@@ -1,0 +1,8 @@
+__pycache__/
+CLAUDE.md
+config.json
+sync_daemon.service
+
+# Runtime files
+sync_state.json*
+sync.log*
