@@ -4,6 +4,7 @@ import logging
 import os
 import queue
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -90,6 +91,8 @@ class SyncDaemon:
         self.transfers_path = self.base_dir / "active_transfers.json"
         self.active_transfers = {}
         self.transfers_lock = threading.Lock()
+        self.rc_port_lock = threading.Lock()
+        self.reserved_rc_ports = set()
         self.logger = self._setup_logging()
 
     def _setup_logging(self) -> logging.Logger:
@@ -499,13 +502,25 @@ class SyncDaemon:
                     self.active_downloads -= 1
                 self.download_queue.task_done()
 
-    def _allocate_rc_port(self) -> int:
-        import socket
-        for port in range(5572, 5583):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(('127.0.0.1', port)) != 0:
-                    return port
-        return 5572
+    def _allocate_rc_port(self) -> Optional[int]:
+        with self.rc_port_lock:
+            for port in range(5572, 5583):
+                if port in self.reserved_rc_ports:
+                    continue
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    if s.connect_ex(("127.0.0.1", port)) == 0:
+                        continue
+                self.reserved_rc_ports.add(port)
+                return port
+        return None
+
+    def _release_rc_port(self, port: int) -> None:
+        with self.rc_port_lock:
+            self.reserved_rc_ports.discard(port)
+
+    def _is_rc_port_conflict(self, output_text: str) -> bool:
+        text = output_text.lower()
+        return "address already in use" in text or "failed to start remote control" in text
 
     def _register_active_transfer(self, rule_id: str, source_file: str, pid: int, rc_port: int) -> None:
         key = self._file_key(rule_id, source_file)
@@ -531,65 +546,151 @@ class SyncDaemon:
         if self.stop_event.is_set():
             return
 
-        rc_port = self._allocate_rc_port()
-        command = [self.config["rclone_command"], "copy", source_file, dest_path,
-                   "--rc", f"--rc-addr=127.0.0.1:{rc_port}", "--rc-no-auth"]
-        bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
-        if bandwidth_limit > 0:
-            command.extend(["--bwlimit", f"{bandwidth_limit}M"])
         start_time = time.time()
         self.log_event(EventType.DOWNLOAD, "download started", rule_id=rule_id, source_file=source_file, dest_path=dest_path)
+        startup_retry_limit = 11
 
-        try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            self._register_active_transfer(rule_id, source_file, process.pid, rc_port)
+        for attempt in range(1, startup_retry_limit + 1):
+            rc_port = self._allocate_rc_port()
+            if rc_port is None:
+                error_text = "no available rc port in range 5572-5582"
+                self.update_download_state(rule_id, source_file, success=False, error=error_text)
+                self.log_error(EventType.ERROR, "download failed", rule_id=rule_id, source_file=source_file, error=error_text)
+                return
 
+            command = [self.config["rclone_command"], "copy", source_file, dest_path,
+                       "--rc", f"--rc-addr=127.0.0.1:{rc_port}", "--rc-no-auth"]
+            bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
+            if bandwidth_limit > 0:
+                command.extend(["--bwlimit", f"{bandwidth_limit}M"])
+
+            registered = False
             try:
-                stdout, stderr = process.communicate(timeout=60 * 60)
-                returncode = process.returncode
-            except subprocess.TimeoutExpired:
-                process.kill()
-                self._unregister_active_transfer(rule_id, source_file)
-                self.update_download_state(rule_id, source_file, success=False, error="rclone timeout")
-                self.log_error(EventType.ERROR, "download timeout", rule_id=rule_id, source_file=source_file)
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+
+                # Detect startup bind failures quickly; retry on rc port conflict.
+                time.sleep(0.5)
+                early_returncode = process.poll()
+                if early_returncode is not None:
+                    stdout, stderr = process.communicate()
+                    stderr_text = (stderr or "").strip()
+                    stdout_text = (stdout or "").strip()
+                    combined_text = stderr_text if stderr_text else stdout_text
+
+                    if early_returncode == 0:
+                        self.update_download_state(rule_id, source_file, success=True, error=None)
+                        duration = round(time.time() - start_time, 3)
+                        self.log_event(
+                            EventType.DOWNLOAD,
+                            "download completed",
+                            rule_id=rule_id,
+                            source_file=source_file,
+                            duration_seconds=duration,
+                        )
+                        return
+
+                    if self._is_rc_port_conflict(combined_text) and attempt < startup_retry_limit:
+                        self.log_event(
+                            EventType.DOWNLOAD,
+                            "download startup retry on rc port conflict",
+                            rule_id=rule_id,
+                            source_file=source_file,
+                            rc_port=rc_port,
+                            attempt=attempt,
+                        )
+                        continue
+
+                    error_text = combined_text or f"rclone startup failed with code {early_returncode}"
+                    self.update_download_state(rule_id, source_file, success=False, error=error_text)
+                    self.log_error(
+                        EventType.ERROR,
+                        "download startup failed",
+                        rule_id=rule_id,
+                        source_file=source_file,
+                        rc_port=rc_port,
+                        returncode=early_returncode,
+                        error=error_text,
+                    )
+                    return
+
+                self._register_active_transfer(rule_id, source_file, process.pid, rc_port)
+                registered = True
+
+                try:
+                    stdout, stderr = process.communicate(timeout=60 * 60)
+                    returncode = process.returncode
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    self.update_download_state(rule_id, source_file, success=False, error="rclone timeout")
+                    self.log_error(EventType.ERROR, "download timeout", rule_id=rule_id, source_file=source_file)
+                    return
+                finally:
+                    if registered:
+                        self._unregister_active_transfer(rule_id, source_file)
+
+                duration = round(time.time() - start_time, 3)
+
+                if returncode == 0:
+                    self.update_download_state(rule_id, source_file, success=True, error=None)
+                    self.log_event(
+                        EventType.DOWNLOAD,
+                        "download completed",
+                        rule_id=rule_id,
+                        source_file=source_file,
+                        duration_seconds=duration,
+                    )
+                    return
+
+                stderr_text = (stderr or "").strip()
+                stdout_text = (stdout or "").strip()
+                error_text = stderr_text if stderr_text else stdout_text
+                self.update_download_state(rule_id, source_file, success=False, error=error_text)
+                self.log_error(
+                    EventType.ERROR,
+                    "download failed",
+                    rule_id=rule_id,
+                    source_file=source_file,
+                    returncode=returncode,
+                    error=error_text,
+                )
+                return
+
+            except OSError as exc:
+                error_text = str(exc)
+                if self._is_rc_port_conflict(error_text) and attempt < startup_retry_limit:
+                    self.log_event(
+                        EventType.DOWNLOAD,
+                        "download startup retry on rc port conflict",
+                        rule_id=rule_id,
+                        source_file=source_file,
+                        rc_port=rc_port,
+                        attempt=attempt,
+                    )
+                    continue
+                self.update_download_state(rule_id, source_file, success=False, error=error_text)
+                self.log_error(
+                    EventType.ERROR,
+                    "download process error",
+                    rule_id=rule_id,
+                    source_file=source_file,
+                    error=error_text,
+                )
                 return
             finally:
-                self._unregister_active_transfer(rule_id, source_file)
+                self._release_rc_port(rc_port)
 
-        except OSError as exc:
-            self.update_download_state(rule_id, source_file, success=False, error=str(exc))
-            self.log_error(EventType.ERROR, "download process error", rule_id=rule_id, source_file=source_file, error=str(exc))
-            return
-
-        duration = round(time.time() - start_time, 3)
-
-        if returncode == 0:
-            self.update_download_state(rule_id, source_file, success=True, error=None)
-            self.log_event(
-                EventType.DOWNLOAD,
-                "download completed",
-                rule_id=rule_id,
-                source_file=source_file,
-                duration_seconds=duration,
-            )
-            return
-
-        stderr_text = (stderr or "").strip()
-        stdout_text = (stdout or "").strip()
-        error_text = stderr_text if stderr_text else stdout_text
-        self.update_download_state(rule_id, source_file, success=False, error=error_text)
+        self.update_download_state(rule_id, source_file, success=False, error="rclone startup retry exhausted")
         self.log_error(
             EventType.ERROR,
-            "download failed",
+            "download startup retry exhausted",
             rule_id=rule_id,
             source_file=source_file,
-            returncode=returncode,
-            error=error_text,
+            retries=startup_retry_limit,
         )
 
     def update_download_state(self, rule_id: str, source_file: str, success: bool, error: Optional[str]) -> None:

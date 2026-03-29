@@ -5,58 +5,134 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sync Daemon 管理面板</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+        tailwind = {
+            config: {
+                theme: {
+                    extend: {
+                        colors: {
+                            brand: {
+                                50: '#eff8ff',
+                                100: '#dceefe',
+                                500: '#2d8cff',
+                                600: '#1f79e0',
+                                700: '#1a65bd'
+                            }
+                        },
+                        boxShadow: {
+                            soft: '0 20px 60px -24px rgba(15, 23, 42, 0.35)'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: 'Manrope', sans-serif;
+            background: radial-gradient(circle at 20% -10%, #d9eeff 0%, transparent 45%),
+                radial-gradient(circle at 90% 0%, #e9f8f2 0%, transparent 40%),
+                #f4f8fb;
+        }
+
+        .panel-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(6px);
+            box-shadow: 0 20px 60px -24px rgba(15, 23, 42, 0.35);
+        }
+
+        .tab-btn {
+            border-bottom: 2px solid transparent;
+            color: #64748b;
+            transition: all 180ms ease;
+        }
+
+        .tab-btn:hover {
+            color: #0f172a;
+            background: #eef4fa;
+        }
+
+        .tab-btn.border-blue-500 {
+            color: #0f172a;
+            border-bottom-color: #2d8cff;
+            background: #e9f3ff;
+        }
+    </style>
 </head>
 
-<body class="bg-gray-100">
-    <div class="container mx-auto p-6">
-        <h1 class="text-3xl font-bold mb-6">Sync Daemon 管理面板</h1>
-
-        <div class="mb-4 border-b border-gray-300">
-            <nav class="flex space-x-4">
-                <button onclick="showTab('config')" id="tab-config"
-                    class="px-4 py-2 font-medium border-b-2 border-blue-500">配置管理</button>
-                <button onclick="showTab('status')" id="tab-status" class="px-4 py-2 font-medium">状态监控</button>
-                <button onclick="showTab('progress')" id="tab-progress" class="px-4 py-2 font-medium">实时进度</button>
-                <button onclick="showTab('logs')" id="tab-logs" class="px-4 py-2 font-medium">日志查看</button>
-            </nav>
-        </div>
-
-        <div id="content-config" class="tab-content">
-            <div class="bg-white p-6 rounded shadow">
-                <h2 class="text-xl font-bold mb-4">配置管理</h2>
-                <div id="config-form"></div>
-                <button onclick="saveConfig()"
-                    class="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">保存配置</button>
-                <div id="config-message" class="mt-4"></div>
+<body class="min-h-screen text-slate-800">
+    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
+        <section class="panel-card mb-6 overflow-hidden p-6 sm:p-8">
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                    <p class="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Sync Daemon</p>
+                    <h1 class="mt-2 text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">管理面板</h1>
+                    <p class="mt-3 max-w-2xl text-sm text-slate-600 sm:text-base">配置同步策略，实时查看传输状态，统一管理运行日志。</p>
+                </div>
+                <div class="rounded-2xl border border-sky-100 bg-sky-50/70 px-4 py-3 text-sm text-sky-700">
+                    前端已启用实时状态刷新
+                </div>
             </div>
-        </div>
+        </section>
 
-        <div id="content-status" class="tab-content hidden">
-            <div class="bg-white p-6 rounded shadow">
-                <h2 class="text-xl font-bold mb-4">状态监控</h2>
-                <div id="stats-cards" class="grid grid-cols-3 gap-4 mb-6"></div>
-                <div id="files-table"></div>
+        <section class="panel-card p-3 sm:p-4">
+            <div class="mb-6 border-b border-slate-200 px-1">
+                <nav class="flex flex-wrap gap-2 pb-2">
+                    <button onclick="showTab('config')" id="tab-config"
+                        class="tab-btn border-blue-500 rounded-lg px-4 py-2 text-sm font-semibold">配置管理</button>
+                    <button onclick="showTab('status')" id="tab-status"
+                        class="tab-btn rounded-lg px-4 py-2 text-sm font-semibold">状态监控</button>
+                    <button onclick="showTab('progress')" id="tab-progress"
+                        class="tab-btn rounded-lg px-4 py-2 text-sm font-semibold">实时进度</button>
+                    <button onclick="showTab('logs')" id="tab-logs"
+                        class="tab-btn rounded-lg px-4 py-2 text-sm font-semibold">日志查看</button>
+                </nav>
             </div>
-        </div>
 
-        <div id="content-progress" class="tab-content hidden">
-            <div class="bg-white p-6 rounded shadow">
-                <h2 class="text-xl font-bold mb-4">实时进度</h2>
-                <div id="progress-list"></div>
+            <div id="content-config" class="tab-content px-2 pb-2 sm:px-3 sm:pb-3">
+                <div class="panel-card p-5 sm:p-6">
+                    <h2 class="mb-5 text-xl font-bold text-slate-900">配置管理</h2>
+                    <div id="config-form"></div>
+                    <button onclick="saveConfig()"
+                        class="mt-5 rounded-lg bg-brand-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-600">保存配置</button>
+                    <div id="config-message" class="mt-4"></div>
+                </div>
             </div>
-        </div>
 
-        <div id="content-logs" class="tab-content hidden">
-            <div class="bg-white p-6 rounded shadow">
-                <h2 class="text-xl font-bold mb-4">日志查看</h2>
-                <button onclick="loadLogs()"
-                    class="mb-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">刷新日志</button>
-                <div id="logs-content"
-                    class="bg-gray-900 text-green-400 p-4 rounded font-mono text-sm h-96 overflow-y-auto"></div>
+            <div id="content-status" class="tab-content hidden px-2 pb-2 sm:px-3 sm:pb-3">
+                <div class="panel-card p-5 sm:p-6">
+                    <h2 class="mb-5 text-xl font-bold text-slate-900">状态监控</h2>
+                    <div id="stats-cards" class="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"></div>
+                    <div id="files-table"></div>
+                </div>
             </div>
-        </div>
+
+            <div id="content-progress" class="tab-content hidden px-2 pb-2 sm:px-3 sm:pb-3">
+                <div class="panel-card p-5 sm:p-6">
+                    <h2 class="mb-5 text-xl font-bold text-slate-900">实时进度</h2>
+                    <div id="progress-list"></div>
+                </div>
+            </div>
+
+            <div id="content-logs" class="tab-content hidden px-2 pb-2 sm:px-3 sm:pb-3">
+                <div class="panel-card p-5 sm:p-6">
+                    <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+                        <h2 class="text-xl font-bold text-slate-900">日志查看</h2>
+                        <button onclick="loadLogs()"
+                            class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-600">刷新日志</button>
+                    </div>
+                    <div id="logs-content"
+                        class="h-96 overflow-y-auto rounded-xl border border-slate-800 bg-slate-900 p-4 font-mono text-sm leading-6 text-emerald-300"></div>
+                </div>
+            </div>
+        </section>
     </div>
 
     <script>
@@ -110,11 +186,11 @@
                 const resp = await apiFetch(`/api/config?_t=${Date.now()}`);
                 currentConfig = await resp.json();
                 if (currentConfig.error) {
-                    document.getElementById('config-message').innerHTML = `<div class="text-red-600">加载配置出错: ${currentConfig.error}</div>`;
+                    document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">加载配置出错: ${currentConfig.error}</div>`;
                 }
                 renderConfigForm(currentConfig);
             } catch (err) {
-                document.getElementById('config-message').innerHTML = `<div class="text-red-600">请求配置失败: ${err}</div>`;
+                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">请求配置失败: ${err}</div>`;
             }
         }
 
@@ -122,28 +198,28 @@
             const form = document.getElementById('config-form');
             form.innerHTML = `
                 <div class="space-y-4">
-                    <div><label class="block font-medium">扫描间隔（秒）</label>
-                    <input type="number" id="scan_interval_seconds" value="${config.scan_interval_seconds}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">刷新间隔（秒）</label>
-                    <input type="number" id="rclone_refresh_interval_seconds" value="${config.rclone_refresh_interval_seconds}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">最大并发下载数</label>
-                    <input type="number" id="max_concurrent_downloads" value="${config.max_concurrent_downloads}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">最大重试次数</label>
-                    <input type="number" id="max_retry_count" value="${config.max_retry_count}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">带宽限制（MB/s，0=无限制）</label>
-                    <input type="number" id="bandwidth_limit_mbps" value="${config.bandwidth_limit_mbps}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">rclone 命令</label>
-                    <input type="text" id="rclone_command" value="${config.rclone_command}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">rclone 服务名</label>
-                    <input type="text" id="rclone_service_name" value="${config.rclone_service_name}" class="w-full border p-2 rounded"></div>
-                    <div><label class="block font-medium">同步脚本 service 名 <span class="text-xs text-gray-500">（保存后自动 systemctl restart，留空则跳过）</span></label>
-                    <input type="text" id="sync_service_name" value="${config.sync_service_name || ''}" placeholder="例如：sync_daemon.service" class="w-full border p-2 rounded"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">扫描间隔（秒）</label>
+                    <input type="number" id="scan_interval_seconds" value="${config.scan_interval_seconds}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">刷新间隔（秒）</label>
+                    <input type="number" id="rclone_refresh_interval_seconds" value="${config.rclone_refresh_interval_seconds}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">最大并发下载数</label>
+                    <input type="number" id="max_concurrent_downloads" value="${config.max_concurrent_downloads}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">最大重试次数</label>
+                    <input type="number" id="max_retry_count" value="${config.max_retry_count}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">带宽限制（MB/s，0=无限制）</label>
+                    <input type="number" id="bandwidth_limit_mbps" value="${config.bandwidth_limit_mbps}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">rclone 命令</label>
+                    <input type="text" id="rclone_command" value="${config.rclone_command}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">rclone 服务名</label>
+                    <input type="text" id="rclone_service_name" value="${config.rclone_service_name}" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                    <div><label class="mb-1 block text-sm font-semibold text-slate-700">同步脚本 service 名 <span class="text-xs font-medium text-slate-500">（保存后自动 systemctl restart，留空则跳过）</span></label>
+                    <input type="text" id="sync_service_name" value="${config.sync_service_name || ''}" placeholder="例如：sync_daemon.service" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
                     <div>
-                        <div class="flex items-center justify-between">
-                            <label class="block font-medium">同步规则</label>
-                            <button type="button" onclick="addRule()" class="px-3 py-1 text-sm bg-green-500 text-white rounded hover:bg-green-600">添加规则</button>
+                        <div class="flex items-center justify-between gap-3">
+                            <label class="block text-sm font-semibold text-slate-700">同步规则</label>
+                            <button type="button" onclick="addRule()" class="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-600">添加规则</button>
                         </div>
-                        <div id="rules-list" class="space-y-2 mt-2"></div>
+                        <div id="rules-list" class="mt-3 space-y-3"></div>
                     </div>
                 </div>
             `;
@@ -153,14 +229,14 @@
         function renderRules(rules) {
             const list = document.getElementById('rules-list');
             list.innerHTML = rules.map((rule, i) => `
-                <div class="border p-3 rounded">
-                    <div class="grid grid-cols-2 gap-2">
-                        <div><label class="text-sm">源路径</label><input type="text" id="rule_${i}_source" value="${rule.source_path}" class="w-full border p-1 rounded text-sm"></div>
-                        <div><label class="text-sm">目标路径</label><input type="text" id="rule_${i}_dest" value="${rule.dest_path}" class="w-full border p-1 rounded text-sm"></div>
+                <div class="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div><label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">源路径</label><input type="text" id="rule_${i}_source" value="${rule.source_path}" class="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
+                        <div><label class="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">目标路径</label><input type="text" id="rule_${i}_dest" value="${rule.dest_path}" class="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100"></div>
                     </div>
-                    <div class="flex items-end justify-between mt-2">
-                        <label class="inline-flex items-center"><input type="checkbox" id="rule_${i}_enabled" ${rule.enabled ? 'checked' : ''} class="mr-2">启用</label>
-                        <button type="button" onclick="deleteRule(${i})" class="px-3 py-1 text-sm bg-red-500 text-white rounded hover:bg-red-600">删除</button>
+                    <div class="mt-3 flex items-end justify-between">
+                        <label class="inline-flex items-center text-sm font-medium text-slate-700"><input type="checkbox" id="rule_${i}_enabled" ${rule.enabled ? 'checked' : ''} class="mr-2 h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500">启用</label>
+                        <button type="button" onclick="deleteRule(${i})" class="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-600">删除</button>
                     </div>
                 </div>
             `).join('');
@@ -193,8 +269,8 @@
             });
             const result = await resp.json();
             document.getElementById('config-message').innerHTML = result.error ?
-                `<div class="text-red-600">${result.error}</div>` :
-                `<div class="text-green-600">${result.message}</div>`;
+                `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>` :
+                `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
         }
 
         async function addRule() {
@@ -202,7 +278,7 @@
             if (sourcePathInput === null) return;
             const sourcePath = sourcePathInput.trim();
             if (!sourcePath) {
-                document.getElementById('config-message').innerHTML = `<div class="text-red-600">source_path 不能为空</div>`;
+                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">source_path 不能为空</div>`;
                 return;
             }
 
@@ -210,7 +286,7 @@
             if (destPathInput === null) return;
             const destPath = destPathInput.trim();
             if (!destPath) {
-                document.getElementById('config-message').innerHTML = `<div class="text-red-600">dest_path 不能为空</div>`;
+                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">dest_path 不能为空</div>`;
                 return;
             }
 
@@ -224,11 +300,11 @@
             });
             const result = await resp.json();
             if (result.error) {
-                document.getElementById('config-message').innerHTML = `<div class="text-red-600">${result.error}</div>`;
+                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>`;
                 return;
             }
 
-            document.getElementById('config-message').innerHTML = `<div class="text-green-600">${result.message}</div>`;
+            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
             await loadConfig();
         }
 
@@ -241,11 +317,11 @@
             });
             const result = await resp.json();
             if (result.error) {
-                document.getElementById('config-message').innerHTML = `<div class="text-red-600">${result.error}</div>`;
+                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>`;
                 return;
             }
 
-            document.getElementById('config-message').innerHTML = `<div class="text-green-600">${result.message}</div>`;
+            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
             await loadConfig();
         }
 
@@ -263,12 +339,12 @@
             currentState = await stateResp.json();
 
             document.getElementById('stats-cards').innerHTML = `
-                <div class="bg-blue-100 p-4 rounded"><div class="text-2xl font-bold">${stats.total}</div><div class="text-sm">总文件数</div></div>
-                <div class="bg-green-100 p-4 rounded"><div class="text-2xl font-bold">${stats.synced}</div><div class="text-sm">已同步</div></div>
-                <div class="bg-yellow-100 p-4 rounded"><div class="text-2xl font-bold">${stats.pending}</div><div class="text-sm">待同步</div></div>
-                <div class="bg-red-100 p-4 rounded"><div class="text-2xl font-bold">${stats.failed}</div><div class="text-sm">失败</div></div>
-                <div class="bg-gray-100 p-4 rounded"><div class="text-2xl font-bold">${stats.baseline}</div><div class="text-sm">基线</div></div>
-                <div class="bg-purple-100 p-4 rounded"><div class="text-2xl font-bold">${stats.permanent_failed}</div><div class="text-sm">永久失败</div></div>
+                <div class="rounded-xl border border-blue-100 bg-blue-50/90 p-4"><div class="text-2xl font-extrabold text-blue-900">${stats.total}</div><div class="mt-1 text-sm font-medium text-blue-800">总文件数</div></div>
+                <div class="rounded-xl border border-emerald-100 bg-emerald-50/90 p-4"><div class="text-2xl font-extrabold text-emerald-900">${stats.synced}</div><div class="mt-1 text-sm font-medium text-emerald-800">已同步</div></div>
+                <div class="rounded-xl border border-amber-100 bg-amber-50/90 p-4"><div class="text-2xl font-extrabold text-amber-900">${stats.pending}</div><div class="mt-1 text-sm font-medium text-amber-800">待同步</div></div>
+                <div class="rounded-xl border border-rose-100 bg-rose-50/90 p-4"><div class="text-2xl font-extrabold text-rose-900">${stats.failed}</div><div class="mt-1 text-sm font-medium text-rose-800">失败</div></div>
+                <div class="rounded-xl border border-slate-200 bg-slate-100/90 p-4"><div class="text-2xl font-extrabold text-slate-800">${stats.baseline}</div><div class="mt-1 text-sm font-medium text-slate-700">基线</div></div>
+                <div class="rounded-xl border border-fuchsia-100 bg-fuchsia-50/90 p-4"><div class="text-2xl font-extrabold text-fuchsia-900">${stats.permanent_failed}</div><div class="mt-1 text-sm font-medium text-fuchsia-800">永久失败</div></div>
             `;
 
             renderFilesTable();
@@ -294,32 +370,32 @@
             const pageFiles = files.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
             const pagerHTML = `
-                <div class="flex items-center gap-2 mt-3">
-                    <button onclick="changePage(-1)" class="px-3 py-1 border rounded hover:bg-gray-100 disabled:opacity-40" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
-                    <span class="text-sm text-gray-600">第 ${currentPage} / ${totalPages} 页（共 ${files.length} 条）</span>
-                    <button onclick="changePage(1)" class="px-3 py-1 border rounded hover:bg-gray-100 disabled:opacity-40" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
+                <div class="mt-4 flex flex-wrap items-center gap-2">
+                    <button onclick="changePage(-1)" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40" ${currentPage <= 1 ? 'disabled' : ''}>上一页</button>
+                    <span class="text-sm text-slate-600">第 ${currentPage} / ${totalPages} 页（共 ${files.length} 条）</span>
+                    <button onclick="changePage(1)" class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40" ${currentPage >= totalPages ? 'disabled' : ''}>下一页</button>
                 </div>
             `;
 
             document.getElementById('files-table').innerHTML = `
                 <div class="mb-4">
-                    <select onchange="currentFolderFilter=this.value; currentPage=1; renderFilesTable()" class="border p-2 rounded max-w-full">
+                    <select onchange="currentFolderFilter=this.value; currentPage=1; renderFilesTable()" class="max-w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-100">
                         ${folderOptionsHTML}
                     </select>
                 </div>
-                <div class="overflow-x-auto"><table class="w-full text-sm">
-                    <thead class="bg-gray-200"><tr>
-                        <th class="p-2 text-left">文件路径</th>
-                        <th class="p-2 text-left">状态</th>
-                        <th class="p-2 text-left">重试次数</th>
-                        <th class="p-2 text-left">最后错误</th>
+                <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white"><table class="min-w-full text-sm">
+                    <thead class="bg-slate-100 text-slate-700"><tr>
+                        <th class="px-3 py-2 text-left font-semibold">文件路径</th>
+                        <th class="px-3 py-2 text-left font-semibold">状态</th>
+                        <th class="px-3 py-2 text-left font-semibold">重试次数</th>
+                        <th class="px-3 py-2 text-left font-semibold">最后错误</th>
                     </tr></thead>
                     <tbody>${pageFiles.map(f => `
-                        <tr class="border-b">
-                            <td class="p-2 truncate max-w-xs">${f.path}</td>
-                            <td class="p-2"><span class="px-2 py-1 rounded text-xs ${getStatusColor(f.status)}">${f.status}</span></td>
-                            <td class="p-2">${f.retry_count || 0}</td>
-                            <td class="p-2 truncate max-w-xs">${f.last_error || '-'}</td>
+                        <tr class="border-b border-slate-100 last:border-none">
+                            <td class="max-w-xs truncate px-3 py-2 text-slate-800">${f.path}</td>
+                            <td class="px-3 py-2"><span class="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${getStatusColor(f.status)}">${f.status}</span></td>
+                            <td class="px-3 py-2 text-slate-700">${f.retry_count || 0}</td>
+                            <td class="max-w-xs truncate px-3 py-2 text-slate-600">${f.last_error || '-'}</td>
                         </tr>
                     `).join('')}</tbody>
                 </table></div>
@@ -334,19 +410,19 @@
 
         function getStatusColor(status) {
             const colors = {
-                synced: 'bg-green-200 text-green-800',
-                pending: 'bg-yellow-200 text-yellow-800',
-                failed: 'bg-red-200 text-red-800',
-                baseline: 'bg-gray-200 text-gray-800',
-                permanent_failed: 'bg-purple-200 text-purple-800'
+                synced: 'bg-emerald-100 text-emerald-800',
+                pending: 'bg-amber-100 text-amber-800',
+                failed: 'bg-rose-100 text-rose-800',
+                baseline: 'bg-slate-200 text-slate-700',
+                permanent_failed: 'bg-fuchsia-100 text-fuchsia-800'
             };
-            return colors[status] || 'bg-gray-200';
+            return colors[status] || 'bg-slate-200 text-slate-700';
         }
 
         function renderProgress(data) {
             const list = document.getElementById('progress-list');
             if (Object.keys(data).length === 0) {
-                list.innerHTML = '<div class="text-gray-500 text-center py-8">暂无下载任务</div>';
+                list.innerHTML = '<div class="rounded-xl border border-slate-200 bg-slate-50 py-10 text-center text-sm font-medium text-slate-500">暂无下载任务</div>';
                 return;
             }
 
@@ -354,25 +430,31 @@
                 const progress = item.progress;
                 if (progress.connecting) {
                     return `
-                        <div class="border p-4 rounded mb-4">
-                            <div class="font-medium mb-2">${progress.current_file || item.transfer_info.source_file}</div>
-                            <div class="w-full bg-gray-200 rounded h-4 mb-1 relative overflow-hidden">
-                                <div class="bg-blue-300 h-4 rounded animate-pulse" style="width: 100%"></div>
+                        <div class="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div class="mb-2 truncate text-sm font-semibold text-slate-800">${progress.current_file || item.transfer_info.source_file}</div>
+                            <div class="relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200">
+                                <div class="h-4 w-full animate-pulse rounded-full bg-sky-300"></div>
                             </div>
-                            <div class="text-sm text-yellow-600">连接 rclone 中…</div>
+                            <div class="text-sm font-medium text-amber-600">连接 rclone 中…</div>
                         </div>
                     `;
                 }
-                // Use at least 5% width so the bar is always visible
-                const barWidth = Math.max(progress.percentage, progress.percentage > 0 ? 5 : 0);
+                // Normalize percentage to avoid invalid width values (e.g. undefined/NaN/string)
+                const percentageValue = Number(progress.percentage);
+                const safePercentage = Number.isFinite(percentageValue)
+                    ? Math.min(100, Math.max(0, percentageValue))
+                    : 0;
+                // Use at least 5% width so the bar is always visible once transfer starts
+                const barWidth = safePercentage > 0 ? Math.max(safePercentage, 5) : 0;
+                const percentageText = safePercentage.toFixed(2).replace(/\.?0+$/, '');
                 return `
-                    <div class="border p-4 rounded mb-4">
-                        <div class="font-medium mb-2">${progress.current_file || item.transfer_info.source_file}</div>
-                        <div class="w-full bg-gray-200 rounded h-4 mb-1 relative">
-                            <div class="bg-blue-500 h-4 rounded transition-all" style="width: ${barWidth}%"></div>
+                    <div class="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div class="mb-2 truncate text-sm font-semibold text-slate-800">${progress.current_file || item.transfer_info.source_file}</div>
+                        <div class="relative mb-1 h-4 w-full overflow-hidden rounded-full bg-slate-200">
+                            <div class="h-4 rounded-full transition-all duration-300 ease-out" style="width: ${barWidth}%; background-color: #2d8cff;"></div>
                         </div>
-                        <div class="text-sm text-gray-700 mb-1">${progress.percentage}% &nbsp;|&nbsp; 速度: ${progress.speedMBps} MB/s &nbsp;|&nbsp; 剩余: ${progress.eta != null ? Math.round(progress.eta) + 's' : '计算中'}</div>
-                        <div class="text-xs text-gray-500">${progress.bytes ? (progress.bytes / 1024 / 1024).toFixed(1) + ' MB' : '0 MB'} / ${progress.totalBytes ? (progress.totalBytes / 1024 / 1024).toFixed(1) + ' MB' : '未知'}</div>
+                        <div class="mb-1 text-sm text-slate-700">${percentageText}% &nbsp;|&nbsp; 速度: ${progress.speedMBps} MB/s &nbsp;|&nbsp; 剩余: ${progress.eta != null ? Math.round(progress.eta) + 's' : '计算中'}</div>
+                        <div class="text-xs text-slate-500">${progress.bytes ? (progress.bytes / 1024 / 1024).toFixed(1) + ' MB' : '0 MB'} / ${progress.totalBytes ? (progress.totalBytes / 1024 / 1024).toFixed(1) + ' MB' : '未知'}</div>
                     </div>
                 `;
             }).join('');
@@ -386,7 +468,7 @@
                 const data = await resp.json();
                 renderProgress(data);
             } catch (err) {
-                console.error("加载实时进度失败", err);
+                console.error('加载实时进度失败', err);
             }
         }
 
