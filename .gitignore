@@ -4,6 +4,7 @@ config.json
 sync_daemon.service
 .DS_Store
 .claude
+instruction.md
 
 # Runtime files
 sync_state.json*
