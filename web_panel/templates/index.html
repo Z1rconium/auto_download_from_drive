@@ -336,22 +336,27 @@
                 return;
             }
 
-            const resp = await apiFetch('/api/config/rules', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    source_path: sourcePath,
-                    dest_path: destPath
-                })
-            });
-            const result = await resp.json();
-            if (result.error) {
-                document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">${result.error}</div>`;
-                return;
+            if (!Array.isArray(currentConfig.rules)) {
+                currentConfig.rules = [];
             }
 
-            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">${result.message}</div>`;
-            await loadConfig();
+            // Preserve current form edits and append the new rule at the end.
+            currentConfig.rules = (currentConfig.rules || []).map((rule, i) => ({
+                ...rule,
+                source_path: document.getElementById(`rule_${i}_source`)?.value ?? rule.source_path,
+                dest_path: document.getElementById(`rule_${i}_dest`)?.value ?? rule.dest_path,
+                enabled: document.getElementById(`rule_${i}_enabled`)?.checked ?? rule.enabled
+            }));
+
+            currentConfig.rules.push({
+                source_path: sourcePath,
+                dest_path: destPath,
+                enabled: true,
+                _comment: 'Set enabled=true after validating source and destination paths.'
+            });
+
+            renderRules(currentConfig.rules);
+            document.getElementById('config-message').innerHTML = `<div class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">规则已添加到列表底部，请点击“保存配置”生效。</div>`;
         }
 
         async function deleteRule(ruleIndex) {
