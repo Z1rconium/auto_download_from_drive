@@ -82,6 +82,48 @@ STATE_PATH = os.path.join(BASE_DIR, 'sync_state.json')
 LOG_PATH = os.path.join(BASE_DIR, 'sync.log')
 TRANSFERS_PATH = os.path.join(BASE_DIR, 'active_transfers.json')
 
+
+def _run_systemctl(action, service_name, timeout=15):
+    command = ['systemctl', action, service_name]
+
+    if os.geteuid() == 0:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        err = (result.stderr or result.stdout or '').strip()
+        return result.returncode == 0, err
+
+    errors = []
+
+    # Prefer sudoers-based NOPASSWD path for service operations.
+    try:
+        sudo_result = subprocess.run(
+            ['sudo', '-n'] + command,
+            capture_output=True, text=True, timeout=timeout
+        )
+        if sudo_result.returncode == 0:
+            return True, ''
+        sudo_err = (sudo_result.stderr or sudo_result.stdout or '').strip()
+        if sudo_err:
+            errors.append(sudo_err)
+    except Exception as e:
+        errors.append(str(e))
+
+    # Fallback to direct systemctl (for environments that rely on polkit rules).
+    try:
+        direct_result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        if direct_result.returncode == 0:
+            return True, ''
+        direct_err = (direct_result.stderr or direct_result.stdout or '').strip()
+        if direct_err:
+            errors.append(direct_err)
+    except Exception as e:
+        errors.append(str(e))
+
+    deduped = []
+    for msg in errors:
+        if msg and msg not in deduped:
+            deduped.append(msg)
+    return False, ' | '.join(deduped)
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -119,14 +161,11 @@ def update_config():
         restart_msg = ''
         if sync_service:
             try:
-                result = subprocess.run(
-                    ['systemctl', 'restart', sync_service],
-                    capture_output=True, text=True, timeout=15
-                )
-                if result.returncode == 0:
+                ok, err = _run_systemctl('restart', sync_service, timeout=15)
+                if ok:
                     restart_msg = f'，已自动重启 {sync_service}'
                 else:
-                    restart_msg = f'，但重启 {sync_service} 失败：{result.stderr.strip()}'
+                    restart_msg = f'，但重启 {sync_service} 失败：{err or "unknown error"}'
             except Exception as e:
                 restart_msg = f'，但重启 {sync_service} 出错：{e}'
 
