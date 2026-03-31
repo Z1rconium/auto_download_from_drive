@@ -309,7 +309,8 @@
             type = 'text',
             value = '',
             placeholder = '',
-            hintText = ''
+            hintText = '',
+            readOnly = false
         }) {
             const wrapper = createElement('div');
             const label = createElement('label', {
@@ -336,6 +337,10 @@
             input.value = value ?? '';
             if (placeholder) {
                 input.placeholder = placeholder;
+            }
+            if (readOnly) {
+                input.readOnly = true;
+                input.className += ' cursor-not-allowed bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400';
             }
 
             wrapper.append(label, input);
@@ -457,14 +462,21 @@
                 { labelText: '最大重试次数', id: 'max_retry_count', type: 'number', value: config.max_retry_count },
                 { labelText: '带宽限制（MB/s，0=无限制）', id: 'bandwidth_limit_mbps', type: 'number', value: config.bandwidth_limit_mbps },
                 { labelText: 'rclone 命令', id: 'rclone_command', type: 'text', value: config.rclone_command },
-                { labelText: 'rclone 服务名', id: 'rclone_service_name', type: 'text', value: config.rclone_service_name },
+                {
+                    labelText: 'rclone 服务名',
+                    id: 'rclone_service_name',
+                    type: 'text',
+                    value: config.rclone_service_name,
+                    placeholder: '例如：rclone-pikpak',
+                    hintText: '（必须以 rclone- 开头）'
+                },
                 {
                     labelText: '同步脚本 service 名',
                     id: 'sync_service_name',
                     type: 'text',
-                    value: config.sync_service_name || '',
-                    placeholder: '例如：sync_daemon.service',
-                    hintText: '（保存后自动 systemctl restart，留空则跳过）'
+                    value: config.sync_service_name || 'sync.service',
+                    hintText: '（固定值，保存后自动 systemctl restart）',
+                    readOnly: true
                 }
             ];
 
@@ -541,6 +553,12 @@
         }
 
         async function saveConfig() {
+            const rcloneServiceName = document.getElementById('rclone_service_name').value.trim();
+            if (!rcloneServiceName.startsWith('rclone-')) {
+                setConfigMessage('error', 'rclone 服务名必须以 rclone- 开头');
+                return;
+            }
+
             // Spread original config first to preserve any extra fields (e.g. _comment)
             const newConfig = {
                 ...currentConfig,
@@ -550,8 +568,8 @@
                 max_retry_count: parseInt(document.getElementById('max_retry_count').value),
                 bandwidth_limit_mbps: parseFloat(document.getElementById('bandwidth_limit_mbps').value),
                 rclone_command: document.getElementById('rclone_command').value,
-                rclone_service_name: document.getElementById('rclone_service_name').value,
-                sync_service_name: document.getElementById('sync_service_name').value,
+                rclone_service_name: rcloneServiceName,
+                sync_service_name: 'sync.service',
                 rules: (currentConfig.rules || []).map((rule, i) => ({
                     ...rule,
                     source_path: document.getElementById(`rule_${i}_source`).value,

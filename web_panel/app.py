@@ -89,9 +89,28 @@ CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
 STATE_PATH = os.path.join(BASE_DIR, 'sync_state.json')
 LOG_PATH = os.path.join(BASE_DIR, 'sync.log')
 TRANSFERS_PATH = os.path.join(BASE_DIR, 'active_transfers.json')
+SYNC_SERVICE_NAME = 'sync.service'
+RCLONE_SERVICE_PREFIX = 'rclone-'
+
+
+def _normalize_config(config):
+    normalized = dict(config or {})
+    normalized['sync_service_name'] = SYNC_SERVICE_NAME
+
+    rclone_service_name = str(normalized.get('rclone_service_name', '')).strip()
+    if not rclone_service_name:
+        return None, 'rclone_service_name is required'
+    if not rclone_service_name.startswith(RCLONE_SERVICE_PREFIX):
+        return None, f'rclone_service_name must start with "{RCLONE_SERVICE_PREFIX}"'
+
+    normalized['rclone_service_name'] = rclone_service_name
+    return normalized, None
 
 
 def _run_systemctl(action, service_name, timeout=15):
+    if action == 'restart' and service_name != SYNC_SERVICE_NAME:
+        return False, f'systemctl restart is only allowed for {SYNC_SERVICE_NAME}'
+
     command = ['systemctl', action, service_name]
 
     if os.geteuid() == 0:
@@ -148,7 +167,11 @@ def auth():
 def get_config():
     try:
         with open(CONFIG_PATH, 'r') as f:
-            return jsonify(json.load(f))
+            config = json.load(f)
+        normalized_config, error = _normalize_config(config)
+        if error:
+            return jsonify({'error': error}), 500
+        return jsonify(normalized_config)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -156,7 +179,9 @@ def get_config():
 @require_api_key
 def update_config():
     try:
-        new_config = request.json
+        new_config = request.json or {}
+        if not isinstance(new_config, dict):
+            return jsonify({'error': 'request body must be a JSON object'}), 400
         if new_config.get('scan_interval_seconds', 0) <= 0:
             return jsonify({'error': 'scan_interval_seconds must be > 0'}), 400
         if new_config.get('rclone_refresh_interval_seconds', 0) <= 0:
@@ -168,21 +193,24 @@ def update_config():
         if new_config.get('bandwidth_limit_mbps', -1) < 0:
             return jsonify({'error': 'bandwidth_limit_mbps must be >= 0'}), 400
 
-        with open(CONFIG_PATH, 'w') as f:
-            json.dump(new_config, f, indent=2)
+        normalized_config, error = _normalize_config(new_config)
+        if error:
+            return jsonify({'error': error}), 400
 
-        # 如果配置了同步脚本 service 名，自动 restart
-        sync_service = new_config.get('sync_service_name', '').strip()
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(normalized_config, f, indent=2)
+
+        # 同步脚本 service 固定为 sync.service，保存后自动 restart
+        sync_service = SYNC_SERVICE_NAME
         restart_msg = ''
-        if sync_service:
-            try:
-                ok, err = _run_systemctl('restart', sync_service, timeout=15)
-                if ok:
-                    restart_msg = f'，已自动重启 {sync_service}'
-                else:
-                    restart_msg = f'，但重启 {sync_service} 失败：{err or "unknown error"}'
-            except Exception as e:
-                restart_msg = f'，但重启 {sync_service} 出错：{e}'
+        try:
+            ok, err = _run_systemctl('restart', sync_service, timeout=15)
+            if ok:
+                restart_msg = f'，已自动重启 {sync_service}'
+            else:
+                restart_msg = f'，但重启 {sync_service} 失败：{err or "unknown error"}'
+        except Exception as e:
+            restart_msg = f'，但重启 {sync_service} 出错：{e}'
 
         return jsonify({'success': True, 'message': f'配置已保存{restart_msg}'})
     except Exception as e:

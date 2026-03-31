@@ -271,11 +271,13 @@ tail -f /var/log/web-panel/error.log
   - `max_retry_count`：单文件最大重试次数。
   - `bandwidth_limit_mbps`：带宽限制（MB/s，0 表示不限）。
   - `rclone_command`：执行 rclone 的命令模板。
-  - `rclone_service_name`：rclone 对应的 systemd 服务名。
-  - `sync_service_name`：同步守护脚本的 systemd 服务名。
+  - `rclone_service_name`：rclone 对应的 systemd 服务名，必须以 `rclone-` 开头。
+  - `sync_service_name`：同步守护脚本的 systemd 服务名，固定写死为 `sync.service`，前端只读。
 
 - Web 表单编辑这些配置并保存到 `config.json`，同时做基础合法性校验：
   - 间隔 > 0、并发数 ≥ 1、重试次数 ≥ 0、带宽限制 ≥ 0。
+  - `rclone_service_name` 必须以 `rclone-` 开头，否则拒绝保存并返回错误。
+  - `sync_service_name` 不接受用户输入，后端保存时会强制覆盖为 `sync.service`。
 
 - 同步规则（rules）管理：
   - 通过“添加规则”按钮弹窗输入：
@@ -287,9 +289,9 @@ tail -f /var/log/web-panel/error.log
     - 开关 `enabled` 状态。
     - 删除规则（`DELETE /api/config/rules/<index>`）。
 
-- 保存配置时，若 `sync_service_name` 不为空，后端会自动尝试：
+- 保存配置时，后端会自动尝试：
   ```bash
-  systemctl restart <sync_service_name>
+  systemctl restart sync.service
   ```
   并在返回信息中附上重启是否成功的提示。
 
@@ -531,4 +533,3 @@ Flask 应用 app.py
 ---
 
 如需在此基础上扩展更多功能（例如：手动触发单文件重试、暂停/恢复任务、用户系统等），可以在 `app.py` 中新增 API，并在 `templates/index.html` 中增加对应的交互与展示逻辑。当前版本的核心目标是：在不侵入现有同步逻辑的前提下，提供安全、可视化、可观测的管理入口。
-
