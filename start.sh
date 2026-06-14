@@ -59,6 +59,12 @@ cat > "$INSTALL_DIR/config.json" << 'JSONEOF'
   "bandwidth_limit_mbps": 0,
   "rclone_command": "rclone",
   "rclone_service_name": "",
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": "",
+    "message_thread_id": null
+  },
   "rules": [
     {
       "source_path": "pikpak:My Pack",

@@ -10,10 +10,13 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 
 CONFIG_FILE = "config.json"
@@ -36,6 +39,12 @@ DEFAULT_CONFIG = {
     "bandwidth_limit_mbps": 0,
     "rclone_command": "rclone",
     "rclone_service_name": SERVICE_NAME,
+    "telegram": {
+        "enabled": False,
+        "bot_token": "",
+        "chat_id": "",
+        "message_thread_id": None
+    },
     "rules": [
         {
             "source_path": "/path/to/mounted/rclone/folder",
@@ -62,6 +71,7 @@ class Rule:
 class EventType:
     SCAN = "SCAN"
     DOWNLOAD = "DOWNLOAD"
+    NOTIFICATION = "NOTIFICATION"
     REFRESH = "REFRESH"
     ERROR = "ERROR"
     SYSTEM = "SYSTEM"
@@ -348,6 +358,7 @@ class SyncDaemon:
         bandwidth_limit = float(cfg.get("bandwidth_limit_mbps", 0))
         rclone_command = str(cfg.get("rclone_command", "rclone"))
         rclone_service = str(cfg.get("rclone_service_name", SERVICE_NAME))
+        telegram = self._load_telegram_config(cfg.get("telegram", {}))
 
         if scan_interval <= 0:
             raise ValueError("scan_interval_seconds must be > 0")
@@ -392,8 +403,42 @@ class SyncDaemon:
             "bandwidth_limit_mbps": bandwidth_limit,
             "rclone_command": rclone_command,
             "rclone_service_name": rclone_service,
+            "telegram": telegram,
         }
         self.rules = rules
+
+    def _load_telegram_config(self, telegram_cfg: object) -> Dict[str, Union[bool, str, int, None]]:
+        if telegram_cfg is None:
+            telegram_cfg = {}
+        if not isinstance(telegram_cfg, dict):
+            raise ValueError("telegram must be an object")
+
+        enabled = telegram_cfg.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("telegram.enabled must be a boolean")
+
+        bot_token = str(telegram_cfg.get("bot_token", "")).strip()
+        chat_id = str(telegram_cfg.get("chat_id", "")).strip()
+        message_thread_id_raw = telegram_cfg.get("message_thread_id", None)
+        message_thread_id = None
+
+        if message_thread_id_raw not in (None, ""):
+            try:
+                message_thread_id = int(message_thread_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("telegram.message_thread_id must be an integer or null") from exc
+            if message_thread_id <= 0:
+                raise ValueError("telegram.message_thread_id must be > 0")
+
+        if enabled and (not bot_token or not chat_id):
+            raise ValueError("telegram.bot_token and telegram.chat_id are required when telegram.enabled=true")
+
+        return {
+            "enabled": enabled,
+            "bot_token": bot_token,
+            "chat_id": chat_id,
+            "message_thread_id": message_thread_id,
+        }
 
     def load_state(self) -> None:
         if not self.state_path.exists():
@@ -874,6 +919,126 @@ class SyncDaemon:
 
         self.save_state()
 
+    def notify_download_completed(self, rule_id: str, source_file: str, dest_path: str, duration_seconds: float) -> None:
+        telegram = self.config.get("telegram", {})
+        if not isinstance(telegram, dict) or not telegram.get("enabled"):
+            return
+
+        message = self._format_download_completed_message(rule_id, source_file, dest_path, duration_seconds)
+        self._send_telegram_message(message)
+
+    def _format_download_completed_message(
+        self,
+        rule_id: str,
+        source_file: str,
+        dest_path: str,
+        duration_seconds: float,
+    ) -> str:
+        filename = Path(source_file.rstrip("/")).name or source_file
+        duration_text = self._format_duration(duration_seconds)
+        completed_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+        return "\n".join(
+            [
+                "✅ 文件同步完成",
+                f"文件: {filename}",
+                f"来源: {source_file}",
+                f"目标: {dest_path}",
+                f"规则: {rule_id}",
+                f"耗时: {duration_text}",
+                f"完成时间: {completed_at}",
+            ]
+        )
+
+    def _format_duration(self, seconds: float) -> str:
+        total_seconds = max(int(round(seconds)), 0)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes or hours:
+            parts.append(f"{minutes}m")
+        parts.append(f"{secs}s")
+        return " ".join(parts)
+
+    def _send_telegram_message(self, message: str) -> None:
+        telegram = self.config.get("telegram", {})
+        if not isinstance(telegram, dict):
+            return
+
+        bot_token = str(telegram.get("bot_token", "")).strip()
+        chat_id = str(telegram.get("chat_id", "")).strip()
+        if not bot_token or not chat_id:
+            return
+
+        payload = {
+            "chat_id": chat_id,
+            "text": message[:4096],
+            "disable_web_page_preview": "true",
+        }
+        message_thread_id = telegram.get("message_thread_id")
+        if message_thread_id is not None:
+            payload["message_thread_id"] = str(message_thread_id)
+
+        data = urllib.parse.urlencode(payload).encode("utf-8")
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        request = urllib.request.Request(url, data=data, method="POST")
+
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                response_body = response.read()
+        except urllib.error.HTTPError as exc:
+            self._log_telegram_http_error(exc)
+            return
+        except Exception as exc:
+            self.log_error(EventType.ERROR, "telegram notification failed", error=str(exc.__class__.__name__))
+            return
+
+        try:
+            result = json.loads(response_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.log_error(EventType.ERROR, "telegram notification failed", error="invalid response")
+            return
+
+        if not result.get("ok"):
+            description = str(result.get("description", "telegram api error"))
+            self.log_error(EventType.ERROR, "telegram notification failed", error=description)
+            return
+
+        self.log_event(EventType.NOTIFICATION, "telegram notification sent", chat_id=chat_id)
+
+    def _log_telegram_http_error(self, exc: urllib.error.HTTPError) -> None:
+        error_text = f"http {exc.code}"
+        try:
+            body = exc.read().decode("utf-8")
+            result = json.loads(body)
+            description = result.get("description")
+            if description:
+                error_text = f"{error_text}: {description}"
+        except Exception:
+            pass
+
+        self.log_error(EventType.ERROR, "telegram notification failed", error=error_text)
+
+    def _mark_download_completed(
+        self,
+        rule_id: str,
+        source_file: str,
+        dest_path: str,
+        start_time: float,
+    ) -> None:
+        self.update_download_state(rule_id, source_file, success=True, error=None)
+        duration = round(time.time() - start_time, 3)
+        self.log_event(
+            EventType.DOWNLOAD,
+            "download completed",
+            rule_id=rule_id,
+            source_file=source_file,
+            duration_seconds=duration,
+        )
+        self.notify_download_completed(rule_id, source_file, dest_path, duration)
+
     def handle_download(self, rule_id: str, source_file: str, dest_path: str) -> None:
         if self.stop_event.is_set():
             return
@@ -927,15 +1092,7 @@ class SyncDaemon:
                     combined_text = stderr_text if stderr_text else stdout_text
 
                     if early_returncode == 0:
-                        self.update_download_state(rule_id, source_file, success=True, error=None)
-                        duration = round(time.time() - start_time, 3)
-                        self.log_event(
-                            EventType.DOWNLOAD,
-                            "download completed",
-                            rule_id=rule_id,
-                            source_file=source_file,
-                            duration_seconds=duration,
-                        )
+                        self._mark_download_completed(rule_id, source_file, dest_path, start_time)
                         return
 
                     if self._is_rc_port_conflict(combined_text) and attempt < startup_retry_limit:
@@ -979,17 +1136,8 @@ class SyncDaemon:
                     if registered:
                         self._unregister_active_transfer(rule_id, source_file)
 
-                duration = round(time.time() - start_time, 3)
-
                 if returncode == 0:
-                    self.update_download_state(rule_id, source_file, success=True, error=None)
-                    self.log_event(
-                        EventType.DOWNLOAD,
-                        "download completed",
-                        rule_id=rule_id,
-                        source_file=source_file,
-                        duration_seconds=duration,
-                    )
+                    self._mark_download_completed(rule_id, source_file, dest_path, start_time)
                     return
 
                 stderr_text = (stderr or "").strip()

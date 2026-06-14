@@ -55,6 +55,12 @@ Edit `/opt/sync/config.json`:
   "bandwidth_limit_mbps": 0,
   "rclone_command": "rclone",
   "rclone_service_name": "",
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": "",
+    "message_thread_id": null
+  },
   "rules": [
     {
       "source_path": "pikpak:My Pack",
@@ -89,7 +95,17 @@ tail -f /opt/sync/sync.log
 | `bandwidth_limit_mbps` | number | `0` disables `--bwlimit`; otherwise passed as `XM` |
 | `rclone_command` | string | `rclone` binary name or absolute path |
 | `rclone_service_name` | string | systemd unit restarted during refresh; leave empty to disable service restart |
+| `telegram` | object | Telegram Bot notification config; sends a readable message after each successful `rclone copy` |
 | `rules` | array | source-to-destination rules |
+
+Telegram fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | enables Telegram notifications |
+| `bot_token` | string | Telegram Bot API token |
+| `chat_id` | string | target chat/channel/group id |
+| `message_thread_id` | int/null | optional forum topic id; use `null` for normal chats |
 
 Rule fields:
 

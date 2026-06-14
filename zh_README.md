@@ -57,6 +57,12 @@ sudo ./start.sh
   "bandwidth_limit_mbps": 0,
   "rclone_command": "rclone",
   "rclone_service_name": "",
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "chat_id": "",
+    "message_thread_id": null
+  },
   "rules": [
     {
       "source_path": "pikpak:My Pack",
@@ -94,7 +100,17 @@ sudo systemctl restart sync.service
 | `bandwidth_limit_mbps` | number | `0` 表示不限速，否则传给 `rclone --bwlimit` |
 | `rclone_command` | string | `rclone` 命令名或绝对路径 |
 | `rclone_service_name` | string | 刷新时要重启的 systemd unit；留空表示不重启服务 |
+| `telegram` | object | Telegram Bot 通知配置；每次 `rclone copy` 成功后发送可读通知 |
 | `rules` | array | 下载规则列表 |
+
+Telegram 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `enabled` | bool | 是否启用 Telegram 通知 |
+| `bot_token` | string | Telegram Bot API token |
+| `chat_id` | string | 目标私聊、群组或频道 id |
+| `message_thread_id` | int/null | 可选的论坛话题 id；普通聊天填 `null` |
 
 规则字段：
 
