@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import socket
 import subprocess
@@ -11,7 +12,6 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -19,6 +19,11 @@ from typing import Dict, List, Optional, Tuple
 CONFIG_FILE = "config.json"
 STATE_FILE = "sync_state.json"
 LOG_FILE = "sync.log"
+LOG_RETENTION_SECONDS = 24 * 60 * 60
+LOG_PRUNE_INTERVAL_SECONDS = 60
+LOG_TIMESTAMP_LENGTH = len("2026-06-14T00:00:00+0000")
+LOG_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+ROTATED_LOG_NAME_RE = re.compile(rf"^{re.escape(LOG_FILE)}\.\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}$")
 RUNTIME_STATUS_FILE = "runtime_status.json"
 SERVICE_NAME = "rclone-pikpak"
 
@@ -69,6 +74,70 @@ class EventTypeFilter(logging.Filter):
         return True
 
 
+class RecentLogFileHandler(logging.FileHandler):
+    def __init__(self, filename: Path, retention_seconds: int, encoding: str):
+        super().__init__(filename, encoding=encoding)
+        self.retention_seconds = retention_seconds
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.prune()
+
+    def prune(self) -> None:
+        self.acquire()
+        try:
+            if self.stream is None:
+                return
+
+            self.flush()
+            path = Path(self.baseFilename)
+            if not path.exists():
+                return
+
+            cutoff_timestamp = datetime.now(timezone.utc).timestamp() - self.retention_seconds
+            encoding = self.encoding or "utf-8"
+
+            with path.open("r+", encoding=encoding) as fp:
+                lines = fp.readlines()
+                kept_lines = []
+                changed = False
+                keep_continuation = False
+
+                for line in lines:
+                    logged_at = self._parse_log_time(line)
+                    if logged_at is None:
+                        if keep_continuation:
+                            kept_lines.append(line)
+                        else:
+                            changed = True
+                        continue
+
+                    keep_continuation = logged_at.timestamp() >= cutoff_timestamp
+                    if keep_continuation:
+                        kept_lines.append(line)
+                    else:
+                        changed = True
+
+                if not changed:
+                    return
+
+                fp.seek(0)
+                fp.writelines(kept_lines)
+                fp.truncate()
+
+            self.stream.seek(0, os.SEEK_END)
+        finally:
+            self.release()
+
+    def _parse_log_time(self, line: str) -> Optional[datetime]:
+        if len(line) < LOG_TIMESTAMP_LENGTH:
+            return None
+        try:
+            return datetime.strptime(line[:LOG_TIMESTAMP_LENGTH], LOG_TIMESTAMP_FORMAT)
+        except ValueError:
+            return None
+
+
 def is_rclone_remote(path: str) -> bool:
     path = path.strip()
     if not path or path.startswith("/"):
@@ -115,6 +184,7 @@ class SyncDaemon:
         self.systemd_watchdog_interval = self._parse_watchdog_interval(watchdog_usec)
         self.watchdog_thread: Optional[threading.Thread] = None
         self.logger = self._setup_logging()
+        self.remove_rotated_log_files()
         self.write_runtime_status()
 
     def _setup_logging(self) -> logging.Logger:
@@ -133,21 +203,38 @@ class SyncDaemon:
         stdout_handler.setFormatter(formatter)
         stdout_handler.addFilter(event_filter)
 
-        file_handler = TimedRotatingFileHandler(
+        file_handler = RecentLogFileHandler(
             self.log_path,
-            when="H",
-            interval=1,
-            backupCount=24,
             encoding="utf-8",
-            utc=True,
+            retention_seconds=LOG_RETENTION_SECONDS,
         )
         file_handler.setFormatter(formatter)
         file_handler.addFilter(event_filter)
+        file_handler.prune()
 
         logger.addHandler(stdout_handler)
         logger.addHandler(file_handler)
 
         return logger
+
+    def prune_log_file(self) -> None:
+        for handler in self.logger.handlers:
+            if isinstance(handler, RecentLogFileHandler):
+                handler.prune()
+
+    def remove_rotated_log_files(self) -> None:
+        removed = 0
+        for path in self.base_dir.iterdir():
+            if not path.is_file() or not ROTATED_LOG_NAME_RE.fullmatch(path.name):
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError as exc:
+                self.log_error(EventType.ERROR, "failed to remove rotated log file", file=str(path), error=str(exc))
+
+        if removed > 0:
+            self.log_event(EventType.SYSTEM, "rotated log files removed", count=removed)
 
     def log_event(self, event_type: str, message: str, **fields: object) -> None:
         payload = {"message": message}
@@ -376,6 +463,7 @@ class SyncDaemon:
 
         last_scan = 0.0
         last_refresh = time.time()
+        last_log_prune = time.time()
         scan_blocked_logged = False
 
         self.log_event(EventType.SYSTEM, "daemon started")
@@ -388,6 +476,10 @@ class SyncDaemon:
                 if now - last_refresh >= self.config["rclone_refresh_interval_seconds"]:
                     self.refresh_mount()
                     last_refresh = time.time()
+
+                if now - last_log_prune >= LOG_PRUNE_INTERVAL_SECONDS:
+                    self.prune_log_file()
+                    last_log_prune = now
 
                 if not self.pause_event.is_set() and now - last_scan >= self.config["scan_interval_seconds"]:
                     active_downloads, queued_downloads = self.get_download_counters()

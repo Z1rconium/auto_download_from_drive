@@ -20,7 +20,7 @@ It watches one or more sources, records a baseline on first run, and only downlo
 - scanning pauses while a download is active or queued
 - periodic mount refresh through `systemctl restart`
 - state persisted in JSON files under the working directory
-- hourly log rotation with roughly 24 hours of retention
+- single `sync.log` file trimmed in place to the latest 24 hours
 - native `systemd` `Type=notify` + watchdog support
 
 This is not bidirectional sync, mirror sync, or delete sync.
@@ -34,7 +34,7 @@ This is not bidirectional sync, mirror sync, or delete sync.
 - `sync_state.json`: persisted file state
 - `runtime_status.json`: active/queued counters
 - `active_transfers.json`: currently running `rclone copy` processes
-- `sync.log`: current log file, rotated hourly
+- `sync.log`: single current log file, trimmed in place to the latest 24 hours
 
 ## Quick Start
 
