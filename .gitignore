@@ -3,6 +3,7 @@ CLAUDE.md
 config.json
 sync_daemon.service
 .DS_Store
+.DS_Store
 .claude
 instruction.md
 web_panel/SECURITY_REVIEW.md
