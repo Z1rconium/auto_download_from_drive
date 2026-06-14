@@ -1,9 +1,0 @@
-flask==3.0.0
-flask-socketio==5.3.5
-flask-cors==4.0.0
-requests==2.31.0
-python-socketio==5.10.0
-gunicorn>=21.2.0
-python-dotenv>=1.0.0
-gevent>=23.9.1
-gevent-websocket>=0.10.1

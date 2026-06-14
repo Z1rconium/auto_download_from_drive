@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
     "_comment": "Edit this file and restart the daemon.",
     "scan_interval_seconds": 300,
     "rclone_refresh_interval_seconds": 1800,
-    "max_concurrent_downloads": 3,
+    "max_concurrent_downloads": 1,
     "max_retry_count": 5,
     "bandwidth_limit_mbps": 0,
     "rclone_command": "rclone",
@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
             "source_path": "/path/to/mounted/rclone/folder",
             "dest_path": "/path/to/local/download/folder",
             "enabled": False,
-            "_comment": "Set enabled=true after paths are valid."
+            "_comment": "source_path supports local mount paths like /mnt/pikpak/My Pack and rclone remotes like pikpak:My Pack. Set enabled=true after paths are valid."
         }
     ]
 }
@@ -48,6 +48,10 @@ class Rule:
     source_path: str
     dest_path: str
     enabled: bool
+
+    @property
+    def source_kind(self) -> str:
+        return "remote" if is_rclone_remote(self.source_path) else "local"
 
 
 class EventType:
@@ -65,6 +69,16 @@ class EventTypeFilter(logging.Filter):
         return True
 
 
+def is_rclone_remote(path: str) -> bool:
+    path = path.strip()
+    if not path or path.startswith("/"):
+        return False
+    remote_name, separator, remote_path = path.partition(":")
+    if separator != ":" or not remote_name or not remote_path:
+        return False
+    return "/" not in remote_name and "\\" not in remote_name
+
+
 class SyncDaemon:
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
@@ -77,6 +91,7 @@ class SyncDaemon:
         self.pause_event = threading.Event()
         self.state_lock = threading.RLock()
         self.queue_lock = threading.Lock()
+        self.download_scan_gate = threading.Lock()
 
         self.download_queue: queue.Queue[Tuple[str, str, str]] = queue.Queue()
         self.queued_files = set()
@@ -95,6 +110,10 @@ class SyncDaemon:
         self.transfers_lock = threading.Lock()
         self.rc_port_lock = threading.Lock()
         self.reserved_rc_ports = set()
+        self.systemd_notify_socket = os.environ.get("NOTIFY_SOCKET", "").strip()
+        watchdog_usec = os.environ.get("WATCHDOG_USEC", "").strip()
+        self.systemd_watchdog_interval = self._parse_watchdog_interval(watchdog_usec)
+        self.watchdog_thread: Optional[threading.Thread] = None
         self.logger = self._setup_logging()
         self.write_runtime_status()
 
@@ -114,11 +133,13 @@ class SyncDaemon:
         stdout_handler.setFormatter(formatter)
         stdout_handler.addFilter(event_filter)
 
-        file_handler = RotatingFileHandler(
+        file_handler = TimedRotatingFileHandler(
             self.log_path,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
+            when="H",
+            interval=1,
+            backupCount=24,
             encoding="utf-8",
+            utc=True,
         )
         file_handler.setFormatter(formatter)
         file_handler.addFilter(event_filter)
@@ -140,10 +161,55 @@ class SyncDaemon:
             payload.update(fields)
         self.logger.error(json.dumps(payload, ensure_ascii=False), extra={"event_type": event_type})
 
+    def _parse_watchdog_interval(self, watchdog_usec: str) -> Optional[float]:
+        if not watchdog_usec:
+            return None
+        try:
+            interval_seconds = int(watchdog_usec) / 1_000_000
+        except ValueError:
+            return None
+        if interval_seconds <= 0:
+            return None
+        return max(interval_seconds / 2, 1.0)
+
+    def _systemd_notify(self, *parts: str) -> None:
+        if not self.systemd_notify_socket:
+            return
+        address = self.systemd_notify_socket
+        if address.startswith("@"):
+            address = "\0" + address[1:]
+        payload = "\n".join(part for part in parts if part)
+        if not payload:
+            return
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+                sock.connect(address)
+                sock.sendall(payload.encode("utf-8"))
+        except OSError:
+            pass
+
+    def _watchdog_loop(self) -> None:
+        interval = self.systemd_watchdog_interval
+        if interval is None:
+            return
+
+        while not self.stop_event.wait(interval):
+            active_downloads, queued_downloads = self.get_download_counters()
+            self._systemd_notify(
+                "WATCHDOG=1",
+                f"STATUS=running active={active_downloads} queued={queued_downloads} paused={self.pause_event.is_set()}",
+            )
+
+    def start_systemd_watchdog(self) -> None:
+        if self.systemd_watchdog_interval is None:
+            return
+        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, name="systemd-watchdog", daemon=True)
+        self.watchdog_thread.start()
+
     def _write_json_atomic(self, path: Path, payload: object) -> None:
         # Use a per-call unique suffix to avoid races when multiple threads
-        # write the same file concurrently (e.g. multiple download workers
-        # all calling write_runtime_status at the same moment).
+        # write the same file concurrently (e.g. status updates from the
+        # main thread and the download worker at the same moment).
         tmp_path = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         with tmp_path.open("w", encoding="utf-8") as fp:
             json.dump(payload, fp, indent=2)
@@ -190,7 +256,7 @@ class SyncDaemon:
 
         scan_interval = int(cfg.get("scan_interval_seconds", 300))
         refresh_interval = int(cfg.get("rclone_refresh_interval_seconds", 1800))
-        max_workers = int(cfg.get("max_concurrent_downloads", 3))
+        configured_max_workers = int(cfg.get("max_concurrent_downloads", 1))
         max_retry_count = int(cfg.get("max_retry_count", 5))
         bandwidth_limit = float(cfg.get("bandwidth_limit_mbps", 0))
         rclone_command = str(cfg.get("rclone_command", "rclone"))
@@ -200,10 +266,10 @@ class SyncDaemon:
             raise ValueError("scan_interval_seconds must be > 0")
         if refresh_interval <= 0:
             raise ValueError("rclone_refresh_interval_seconds must be > 0")
-        if max_workers <= 0:
+        if configured_max_workers <= 0:
             raise ValueError("max_concurrent_downloads must be > 0")
-        if max_retry_count < 0:
-            raise ValueError("max_retry_count must be >= 0")
+        if max_retry_count <= 0:
+            raise ValueError("max_retry_count must be > 0")
         if bandwidth_limit < 0:
             raise ValueError("bandwidth_limit_mbps must be >= 0")
 
@@ -217,7 +283,9 @@ class SyncDaemon:
                 raise ValueError(f"rules[{idx}] must be an object")
             source_path = str(item.get("source_path", "")).strip()
             dest_path = str(item.get("dest_path", "")).strip()
-            enabled = bool(item.get("enabled", False))
+            enabled = item.get("enabled", False)
+            if not isinstance(enabled, bool):
+                raise ValueError(f"rules[{idx}].enabled must be a boolean")
             if not source_path or not dest_path:
                 raise ValueError(f"rules[{idx}] source_path/dest_path must be non-empty")
             rules.append(
@@ -232,7 +300,7 @@ class SyncDaemon:
         self.config = {
             "scan_interval_seconds": scan_interval,
             "rclone_refresh_interval_seconds": refresh_interval,
-            "max_concurrent_downloads": max_workers,
+            "max_concurrent_downloads": 1,
             "max_retry_count": max_retry_count,
             "bandwidth_limit_mbps": bandwidth_limit,
             "rclone_command": rclone_command,
@@ -304,11 +372,14 @@ class SyncDaemon:
 
         self.install_signal_handlers()
         self.start_workers()
+        self.start_systemd_watchdog()
 
         last_scan = 0.0
         last_refresh = time.time()
+        scan_blocked_logged = False
 
         self.log_event(EventType.SYSTEM, "daemon started")
+        self._systemd_notify("READY=1", "STATUS=daemon started")
 
         try:
             while not self.stop_event.is_set():
@@ -319,9 +390,28 @@ class SyncDaemon:
                     last_refresh = time.time()
 
                 if not self.pause_event.is_set() and now - last_scan >= self.config["scan_interval_seconds"]:
-                    self.incremental_scan()
-                    self.enqueue_retry_candidates()
-                    last_scan = time.time()
+                    active_downloads, queued_downloads = self.get_download_counters()
+                    if active_downloads > 0 or queued_downloads > 0:
+                        if not scan_blocked_logged:
+                            self.log_event(
+                                EventType.SCAN,
+                                "scan skipped because download work is active",
+                                active_downloads=active_downloads,
+                                queued_downloads=queued_downloads,
+                            )
+                            scan_blocked_logged = True
+                    elif self.download_scan_gate.acquire(blocking=False):
+                        try:
+                            self.incremental_scan()
+                            self.enqueue_retry_candidates()
+                            last_scan = time.time()
+                            scan_blocked_logged = False
+                        finally:
+                            self.download_scan_gate.release()
+                    else:
+                        if not scan_blocked_logged:
+                            self.log_event(EventType.SCAN, "scan skipped because download is starting")
+                            scan_blocked_logged = True
 
                 time.sleep(1)
         finally:
@@ -342,14 +432,28 @@ class SyncDaemon:
                         "files": {},
                     }
                 else:
-                    rules_state[rule.rule_id]["source_path"] = rule.source_path
-                    rules_state[rule.rule_id]["dest_path"] = rule.dest_path
-                    rules_state[rule.rule_id]["enabled"] = rule.enabled
-                    rules_state[rule.rule_id].setdefault("files", {})
-                    rules_state[rule.rule_id].setdefault("initialized", False)
+                    existing = rules_state[rule.rule_id]
+                    if existing.get("source_path") != rule.source_path:
+                        rules_state[rule.rule_id] = {
+                            "source_path": rule.source_path,
+                            "dest_path": rule.dest_path,
+                            "enabled": rule.enabled,
+                            "initialized": False,
+                            "files": {},
+                        }
+                    else:
+                        existing["dest_path"] = rule.dest_path
+                        existing["enabled"] = rule.enabled
+                        existing.setdefault("files", {})
+                        existing.setdefault("initialized", False)
         self.save_state()
 
     def discover_files(self, source_path: str) -> Dict[str, Dict[str, object]]:
+        if is_rclone_remote(source_path):
+            return self.discover_remote_files(source_path)
+        return self.discover_local_files(source_path)
+
+    def discover_local_files(self, source_path: str) -> Dict[str, Dict[str, object]]:
         files = {}
         for root, _dirs, file_names in os.walk(source_path):
             for name in file_names:
@@ -365,6 +469,59 @@ class SyncDaemon:
                     "last_seen": self.now_iso(),
                 }
         return files
+
+    def discover_remote_files(self, source_path: str) -> Dict[str, Dict[str, object]]:
+        command = [
+            self.config["rclone_command"],
+            "lsjson",
+            source_path,
+            "--recursive",
+            "--files-only",
+            "--no-mimetype",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+        if result.returncode != 0:
+            error_text = (result.stderr or result.stdout or "").strip() or f"rclone lsjson failed with code {result.returncode}"
+            raise RuntimeError(error_text)
+
+        try:
+            entries = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid rclone lsjson output: {exc}") from exc
+
+        files = {}
+        now = self.now_iso()
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            relative_path = str(item.get("Path", "")).strip()
+            if not relative_path:
+                continue
+            full_path = self._join_remote_path(source_path, relative_path)
+            files[full_path] = {
+                "size": int(item.get("Size", 0)),
+                "mtime_ns": self._to_mtime_ns(item.get("ModTime")),
+                "last_seen": now,
+            }
+        return files
+
+    def _join_remote_path(self, source_root: str, relative_path: str) -> str:
+        source_root = source_root.rstrip("/")
+        relative_path = relative_path.lstrip("/")
+        if source_root.endswith(":"):
+            return f"{source_root}{relative_path}"
+        return f"{source_root}/{relative_path}"
+
+    def _to_mtime_ns(self, value: object) -> int:
+        if not value:
+            return 0
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            return int(datetime.fromisoformat(text).timestamp() * 1_000_000_000)
+        except ValueError:
+            return 0
 
     def bootstrap_scan(self) -> None:
         for rule in self.rules:
@@ -385,7 +542,18 @@ class SyncDaemon:
                 if rule_state.get("initialized", False):
                     continue
 
-            discovered = self.discover_files(rule.source_path)
+            try:
+                discovered = self.discover_files(rule.source_path)
+            except Exception as exc:
+                self.log_error(
+                    EventType.ERROR,
+                    "bootstrap scan failed",
+                    rule_id=rule.rule_id,
+                    source_path=rule.source_path,
+                    source_kind=rule.source_kind,
+                    error=str(exc),
+                )
+                continue
 
             with self.state_lock:
                 rule_state = self.state["rules"][rule.rule_id]
@@ -427,7 +595,18 @@ class SyncDaemon:
                 )
                 continue
 
-            discovered = self.discover_files(rule.source_path)
+            try:
+                discovered = self.discover_files(rule.source_path)
+            except Exception as exc:
+                self.log_error(
+                    EventType.ERROR,
+                    "incremental scan failed",
+                    rule_id=rule.rule_id,
+                    source_path=rule.source_path,
+                    source_kind=rule.source_kind,
+                    error=str(exc),
+                )
+                continue
             new_files = 0
 
             with self.state_lock:
@@ -484,7 +663,7 @@ class SyncDaemon:
                     retry_count = int(file_state.get("retry_count", 0))
                     if status not in ("pending", "failed"):
                         continue
-                    if retry_count >= max_retry:
+                    if status == "failed" and retry_count >= max_retry:
                         continue
                     if self.enqueue_download(rule.rule_id, source_file, rule.dest_path):
                         queued_count += 1
@@ -537,7 +716,8 @@ class SyncDaemon:
                 pass
 
             try:
-                self.handle_download(rule_id, source_file, dest_path)
+                with self.download_scan_gate:
+                    self.handle_download(rule_id, source_file, dest_path)
             finally:
                 with self.queue_lock:
                     self.in_progress_files.discard(key)
@@ -621,8 +801,17 @@ class SyncDaemon:
                 self.log_error(EventType.ERROR, "download failed", rule_id=rule_id, source_file=source_file, error=error_text)
                 return
 
-            command = [self.config["rclone_command"], "copy", source_file, dest_path,
-                       "--rc", f"--rc-addr=127.0.0.1:{rc_port}", "--rc-no-auth"]
+            command = [
+                self.config["rclone_command"], "copy", source_file, dest_path,
+                "--transfers", "2",
+                "--multi-thread-streams", "4",
+                "--multi-thread-cutoff", "100M",
+                "--retries", "10",
+                "--low-level-retries", "20",
+                "--timeout", "1m",
+                "--contimeout", "15s",
+                "--rc", f"--rc-addr=127.0.0.1:{rc_port}", "--rc-no-auth",
+            ]
             bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
             if bandwidth_limit > 0:
                 command.extend(["--bwlimit", f"{bandwidth_limit}M"])
@@ -690,6 +879,7 @@ class SyncDaemon:
                     returncode = process.returncode
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    stdout, stderr = process.communicate()
                     self.update_download_state(rule_id, source_file, success=False, error="rclone timeout")
                     self.log_error(EventType.ERROR, "download timeout", rule_id=rule_id, source_file=source_file)
                     return
@@ -788,6 +978,9 @@ class SyncDaemon:
             return
 
         service_name = self.config["rclone_service_name"]
+        if not service_name:
+            self.log_event(EventType.REFRESH, "refresh skipped because no rclone service is configured")
+            return
         active_downloads, queued_downloads = self.get_download_counters()
         if active_downloads > 0 or queued_downloads > 0:
             self.log_event(
@@ -873,6 +1066,8 @@ class SyncDaemon:
         return False
 
     def is_path_ready(self, path: str) -> bool:
+        if is_rclone_remote(path):
+            return self.is_remote_ready(path)
         if not os.path.isdir(path):
             return False
 
@@ -883,6 +1078,19 @@ class SyncDaemon:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=5,
+                check=False,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def is_remote_ready(self, path: str) -> bool:
+        try:
+            result = subprocess.run(
+                [self.config["rclone_command"], "lsf", path, "--max-depth", "1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
                 check=False,
             )
             return result.returncode == 0
@@ -925,11 +1133,14 @@ class SyncDaemon:
 
     def shutdown(self) -> None:
         self.stop_event.set()
+        self._systemd_notify("STOPPING=1", "STATUS=shutting down")
         self._drain_pending_queue()
         self.wait_for_download_idle(timeout_seconds=300)
 
         for worker in self.workers:
             worker.join(timeout=2)
+        if self.watchdog_thread is not None:
+            self.watchdog_thread.join(timeout=2)
 
         self.save_state()
         self.log_event(EventType.SYSTEM, "daemon stopped")
