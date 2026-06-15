@@ -9,14 +9,16 @@
 
 `auto_download_from_drive` is a lightweight Linux daemon driven entirely by [`sync_daemon.py`](./sync_daemon.py).
 
-It watches one or more sources, records a baseline on first run, and only downloads files discovered later. Actual transfers are executed with `rclone copy` using fixed transfer/retry/timeout defaults tuned for multi-threaded downloads.
+It watches one or more sources, records a baseline on first run, and only downloads files discovered later after their size and mtime are stable across two scans. Actual transfers are executed with `rclone copyto` so the source directory layout is preserved under the destination.
 
 ## Features
 
 - one-way incremental download only
 - supports local mount paths like `/mnt/pikpak/My Pack`
 - supports direct rclone remotes like `pikpak:My Pack`
-- serialized downloads with retry and timeout handling
+- serialized downloads with retry handling
+- preserves source subdirectories and avoids same-name file collisions
+- waits for new files to stabilize before downloading
 - scanning pauses while a download is active or queued
 - periodic mount refresh through `systemctl restart`
 - state persisted in JSON files under the working directory
@@ -33,7 +35,7 @@ This is not bidirectional sync, mirror sync, or delete sync.
 - `config.json`: runtime config, auto-created if missing
 - `sync_state.json`: persisted file state
 - `runtime_status.json`: active/queued counters
-- `active_transfers.json`: currently running `rclone copy` processes
+- `active_transfers.json`: currently running `rclone copyto` processes
 - `sync.log`: single current log file, trimmed in place to the latest 24 hours
 
 ## Quick Start
@@ -52,6 +54,7 @@ Edit `/opt/sync/config.json`:
   "rclone_refresh_interval_seconds": 1800,
   "max_concurrent_downloads": 1,
   "max_retry_count": 5,
+  "download_timeout_seconds": 0,
   "bandwidth_limit_mbps": 0,
   "rclone_command": "rclone",
   "rclone_service_name": "",
@@ -92,10 +95,11 @@ tail -f /opt/sync/sync.log
 | `rclone_refresh_interval_seconds` | int | delay between refresh cycles |
 | `max_concurrent_downloads` | int | kept for config compatibility; runtime forces single-file downloads |
 | `max_retry_count` | int | positive failure threshold before `permanent_failed` |
+| `download_timeout_seconds` | int | total transfer timeout; `0` disables the daemon-side timeout |
 | `bandwidth_limit_mbps` | number | `0` disables `--bwlimit`; otherwise passed as `XM` |
 | `rclone_command` | string | `rclone` binary name or absolute path |
 | `rclone_service_name` | string | systemd unit restarted during refresh; leave empty to disable service restart |
-| `telegram` | object | Telegram Bot notification config; sends a readable message after each successful `rclone copy` |
+| `telegram` | object | Telegram Bot notification config; sends a readable message after each successful `rclone copyto` |
 | `rules` | array | source-to-destination rules |
 
 Telegram fields:
@@ -114,6 +118,7 @@ Rule fields:
 | `source_path` | string | local mount path or direct rclone remote |
 | `dest_path` | string | local destination path |
 | `enabled` | bool | enables the rule; must be a JSON boolean, not a string |
+| `id` | string | optional stable rule id; if omitted, one is derived from `source_path` + `dest_path` |
 
 ## How It Works
 
@@ -123,14 +128,23 @@ First run for a rule:
 existing files -> baseline
 ```
 
-Changing a rule's `source_path` resets that rule's state and creates a new baseline for the new source.
+Rules use a stable id instead of the array index, so reordering `rules` does not reset state. Changing a rule's `source_path` or `dest_path` without an explicit `id` creates a new derived id and a new baseline.
 
 Later scans:
 
 ```text
-new files -> pending -> synced
-                 |
-                 -> failed -> permanent_failed
+new files -> observed -> pending -> synced
+                         |
+                         -> failed -> permanent_failed
+```
+
+`observed` means the daemon has seen a new or changed non-baseline file but has not downloaded it yet. It becomes `pending` only after size and mtime are unchanged across the next scan.
+
+Destination layout:
+
+```text
+source: pikpak:Movies/A/movie.mkv
+dest:   /data/downloads/Movies/A/movie.mkv
 ```
 
 Refresh flow:
@@ -147,6 +161,7 @@ Minimal local check:
 
 ```bash
 python3 -m py_compile sync_daemon.py
+python3 -m unittest
 python3 sync_daemon.py
 ```
 

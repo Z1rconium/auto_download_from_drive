@@ -12,10 +12,12 @@
 它是一个单向增量下载守护进程：
 
 - 首次扫描只建立基线，不回补历史文件
-- 后续只处理新出现的文件
-- 实际下载用 `rclone copy`，并默认附加多线程、重试和超时参数
+- 后续只处理新出现的文件，但会等 size/mtime 连续两次扫描稳定后再下载
+- 实际下载用 `rclone copyto`，会在目标目录下保留源端相对路径
 - 支持本地挂载目录和直接 rclone remote
-- 支持串行下载、重试、超时、带宽限制
+- 支持串行下载、重试、带宽限制
+- 保留源端子目录，避免同名文件互相覆盖
+- 新文件稳定后才会入队下载
 - 有下载任务活跃或排队时暂停扫描，等下载空闲后再检测新文件
 - 支持 systemd 保活和 watchdog
 - 单个 `sync.log` 文件原地裁剪，只保留最近 24 小时记录
@@ -35,7 +37,7 @@
 - `config.json`：运行配置，不存在时自动生成
 - `sync_state.json`：状态持久化
 - `runtime_status.json`：当前活跃/排队计数
-- `active_transfers.json`：当前执行中的 `rclone copy`
+- `active_transfers.json`：当前执行中的 `rclone copyto`
 - `sync.log`：单个当前日志文件，原地裁剪为最近 24 小时记录
 
 ## 安装
@@ -54,6 +56,7 @@ sudo ./start.sh
   "rclone_refresh_interval_seconds": 1800,
   "max_concurrent_downloads": 1,
   "max_retry_count": 5,
+  "download_timeout_seconds": 0,
   "bandwidth_limit_mbps": 0,
   "rclone_command": "rclone",
   "rclone_service_name": "",
@@ -97,10 +100,11 @@ sudo systemctl restart sync.service
 | `rclone_refresh_interval_seconds` | int | 刷新周期 |
 | `max_concurrent_downloads` | int | 为兼容旧配置保留；运行时固定单文件下载 |
 | `max_retry_count` | int | 正整数，达到 `permanent_failed` 前的失败阈值 |
+| `download_timeout_seconds` | int | 单次下载总超时；`0` 表示不启用守护进程侧总超时 |
 | `bandwidth_limit_mbps` | number | `0` 表示不限速，否则传给 `rclone --bwlimit` |
 | `rclone_command` | string | `rclone` 命令名或绝对路径 |
 | `rclone_service_name` | string | 刷新时要重启的 systemd unit；留空表示不重启服务 |
-| `telegram` | object | Telegram Bot 通知配置；每次 `rclone copy` 成功后发送可读通知 |
+| `telegram` | object | Telegram Bot 通知配置；每次 `rclone copyto` 成功后发送可读通知 |
 | `rules` | array | 下载规则列表 |
 
 Telegram 字段：
@@ -119,6 +123,7 @@ Telegram 字段：
 | `source_path` | string | 本地挂载路径或直接 rclone remote |
 | `dest_path` | string | 本地目标目录 |
 | `enabled` | bool | 是否启用；必须是 JSON boolean，不能写成字符串 |
+| `id` | string | 可选稳定规则 id；不填时根据 `source_path` + `dest_path` 自动生成 |
 
 ## 工作方式
 
@@ -128,14 +133,24 @@ Telegram 字段：
 已有文件 -> baseline
 ```
 
-修改规则的 `source_path` 会重置该规则状态，并为新源重新建立 baseline。
+规则状态不再使用数组下标作为 id，所以调整 `rules` 顺序不会重置状态。不显式配置 `id` 时，修改规则的 `source_path` 或 `dest_path` 会生成新的自动 id，并为新规则重新建立 baseline。
 
 后续扫描时：
 
 ```text
-新文件 -> pending -> synced
-             |
-             -> failed -> permanent_failed
+新文件 -> observed -> pending -> synced
+                 |
+                 -> failed -> permanent_failed
+```
+
+`observed` 表示守护进程已经看到新文件或已同步文件的新版本，但还不会立刻下载。只有下一次扫描发现 size/mtime 没变，才会进入 `pending` 并入队。
+
+目标目录结构：
+
+```text
+source_path: pikpak:
+源文件:      pikpak:Movies/A/movie.mkv
+目标文件:    /data/downloads/Movies/A/movie.mkv
 ```
 
 刷新流程：
@@ -161,6 +176,7 @@ cat /opt/sync/active_transfers.json
 
 ```bash
 python3 -m py_compile sync_daemon.py
+python3 -m unittest
 python3 sync_daemon.py
 ```
 
