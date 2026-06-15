@@ -36,8 +36,6 @@
 - `update.sh`：更新 `/opt/sync/sync_daemon.py` 和 `sync.service`
 - `config.json`：运行配置，不存在时自动生成
 - `sync_state.json`：状态持久化
-- `runtime_status.json`：当前活跃/排队计数
-- `active_transfers.json`：当前执行中的 `rclone copyto`
 - `sync.log`：单个当前日志文件，原地裁剪为最近 24 小时记录
 
 ## 安装
@@ -168,8 +166,6 @@ source_path: pikpak:
 ```bash
 sudo journalctl -u sync.service -f
 tail -f /opt/sync/sync.log
-cat /opt/sync/runtime_status.json
-cat /opt/sync/active_transfers.json
 ```
 
 ## 本地检查

@@ -34,8 +34,6 @@ This is not bidirectional sync, mirror sync, or delete sync.
 - `update.sh`: update `/opt/sync/sync_daemon.py` and refresh `sync.service`
 - `config.json`: runtime config, auto-created if missing
 - `sync_state.json`: persisted file state
-- `runtime_status.json`: active/queued counters
-- `active_transfers.json`: currently running `rclone copyto` processes
 - `sync.log`: single current log file, trimmed in place to the latest 24 hours
 
 ## Quick Start
