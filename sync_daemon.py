@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -388,16 +389,6 @@ class SyncDaemon:
             return
         self.watchdog_thread = threading.Thread(target=self._watchdog_loop, name="systemd-watchdog", daemon=True)
         self.watchdog_thread.start()
-
-    def _write_json_atomic(self, path: Path, payload: object) -> None:
-        # Use a per-call unique suffix to avoid races when multiple threads
-        # write the same file concurrently (e.g. status updates from the
-        # main thread and the download worker at the same moment).
-        tmp_path = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        with tmp_path.open("w", encoding="utf-8") as fp:
-            json.dump(payload, fp, indent=2)
-            fp.write("\n")
-        os.replace(tmp_path, path)
 
     def get_download_counters(self) -> Tuple[int, int]:
         with self.queue_lock:
@@ -788,12 +779,11 @@ class SyncDaemon:
         return files
 
     def _join_remote_path(self, source_root: str, relative_path: str) -> str:
-        # Validate relative_path doesn't contain path traversal
-        if '..' in relative_path or relative_path.startswith('/'):
+        path = Path(relative_path)
+        if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
             raise ValueError(f"invalid relative path: {relative_path}")
 
         source_root = source_root.rstrip("/")
-        relative_path = relative_path.lstrip("/")
         if source_root.endswith(":"):
             return f"{source_root}{relative_path}"
         return f"{source_root}/{relative_path}"
