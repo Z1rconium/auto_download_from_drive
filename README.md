@@ -14,7 +14,7 @@ It watches one or more sources, records a baseline on first run, and only downlo
 ## Features
 
 - one-way incremental download only
-- supports local mount paths like `/mnt/pikpak/My Pack`
+- supports local absolute paths like `/mnt/pikpak/My Pack`
 - supports direct rclone remotes like `pikpak:My Pack`
 - configurable concurrent downloads with retry handling
 - preserves source subdirectories and avoids same-name file collisions
@@ -83,6 +83,8 @@ Edit `/opt/sync/config.json`:
 }
 ```
 
+`dest_path` can also be a direct rclone remote, for example `"pikpak:Downloads"`.
+
 Restart:
 
 ```bash
@@ -137,8 +139,8 @@ Rule fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `source_path` | string | local mount path or direct rclone remote |
-| `dest_path` | string | local destination path |
+| `source_path` | string | local absolute path or direct rclone remote |
+| `dest_path` | string | local absolute destination path or direct rclone remote |
 | `enabled` | bool | enables the rule; must be a JSON boolean, not a string |
 | `id` | string | optional stable rule id; if omitted, one is derived from `source_path` + `dest_path` |
 

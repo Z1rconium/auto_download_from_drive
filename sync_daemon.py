@@ -79,7 +79,7 @@ DEFAULT_CONFIG = {
             "source_path": "/path/to/mounted/rclone/folder",
             "dest_path": "/path/to/local/download/folder",
             "enabled": False,
-            "_comment": "source_path supports local mount paths like /mnt/pikpak/My Pack and rclone remotes like pikpak:My Pack. Set enabled=true after paths are valid."
+            "_comment": "source_path and dest_path support local absolute paths like /mnt/pikpak/My Pack and rclone remotes like pikpak:My Pack. Set enabled=true after paths are valid."
         }
     ]
 }
@@ -530,25 +530,25 @@ class SyncDaemon:
             relative_path = source_file.split(":", 1)[-1].lstrip("/")
         return relative_path
 
-    def _dest_file_path(self, dest_root: str, relative_path: str) -> Path:
+    def _validated_relative_path_parts(self, relative_path: str) -> Tuple[str, ...]:
         path = Path(relative_path)
 
-        # Check for absolute path
         if path.is_absolute():
             raise ValueError(f"relative path must not be absolute: {relative_path}")
 
-        # Check each path component for invalid entries
         for part in path.parts:
             if part in ("", ".", ".."):
                 raise ValueError(f"invalid path component: {part}")
-            # Check for colon in path component (Windows drive letters, UNC paths)
             if ':' in part:
                 raise ValueError(f"invalid path component (contains colon): {part}")
 
-        dest_root_path = Path(dest_root).resolve()
-        dest_file = dest_root_path.joinpath(*path.parts)
+        return path.parts
 
-        # Resolve symlinks and verify the path stays within dest_root
+    def _dest_file_path(self, dest_root: str, relative_path: str) -> Path:
+        path_parts = self._validated_relative_path_parts(relative_path)
+        dest_root_path = Path(dest_root).resolve()
+        dest_file = dest_root_path.joinpath(*path_parts)
+
         try:
             dest_file_resolved = dest_file.resolve()
             dest_file_resolved.relative_to(dest_root_path)
@@ -556,6 +556,12 @@ class SyncDaemon:
             raise ValueError(f"destination path escapes root: {relative_path}")
 
         return dest_file
+
+    def _dest_file_target(self, dest_root: str, relative_path: str) -> str:
+        if is_rclone_remote(dest_root):
+            path_parts = self._validated_relative_path_parts(relative_path)
+            return self._join_remote_path(dest_root, "/".join(path_parts))
+        return str(self._dest_file_path(dest_root, relative_path))
 
     def _rule_config_id(self, _idx: int, item: dict) -> str:
         configured_id = str(item.get("id", "")).strip()
@@ -2059,8 +2065,9 @@ class SyncDaemon:
             return
 
         try:
-            dest_file = self._dest_file_path(dest_path, task.relative_path)
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            dest_file = self._dest_file_target(dest_path, task.relative_path)
+            if not is_rclone_remote(dest_path):
+                Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as exc:
             error_text = f"failed to prepare destination: {exc}"
             self.update_download_state(rule_id, source_file, success=False, error=error_text)
@@ -2092,7 +2099,7 @@ class SyncDaemon:
                     host = str(rc_config.get("host", "127.0.0.1"))
                 rc_addr = f"{host}:{rc_port}"
                 rc_url = f"http://{rc_addr}"
-                command = self._build_rclone_copy_command(source_file, str(dest_file), rc_addr)
+                command = self._build_rclone_copy_command(source_file, dest_file, rc_addr)
 
                 process = subprocess.Popen(
                     command,

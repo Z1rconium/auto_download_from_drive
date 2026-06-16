@@ -14,7 +14,7 @@
 - 首次扫描只建立基线，不回补历史文件
 - 后续只处理新出现的文件，但会等 size/mtime 连续两次扫描稳定后再下载
 - 实际下载用 `rclone copyto`，会在目标目录下保留源端相对路径
-- 支持本地挂载目录和直接 rclone remote
+- 支持本地绝对路径和直接 rclone remote
 - 支持可配置并发下载、重试、带宽限制
 - 保留源端子目录，避免同名文件互相覆盖
 - 新文件稳定后才会入队下载
@@ -26,10 +26,12 @@
 
 这不是双向同步，不是镜像同步，也不会删除目标目录文件。
 
-## 支持的 `source_path`
+## 支持的路径格式
 
 - 本地挂载路径：`/mnt/pikpak/My Pack`
 - 直接 rclone remote：`pikpak:My Pack`
+
+`source_path` 和 `dest_path` 都支持这两种格式。
 
 ## 项目文件
 
@@ -84,6 +86,8 @@ sudo ./start.sh
   ]
 }
 ```
+
+`dest_path` 也可以直接写 rclone remote，例如 `"pikpak:Downloads"`。
 
 如果你是直接 remote 模式，`rclone_service_name` 可以留空。
 
@@ -142,8 +146,8 @@ Rclone RC 字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `source_path` | string | 本地挂载路径或直接 rclone remote |
-| `dest_path` | string | 本地目标目录 |
+| `source_path` | string | 本地绝对路径或直接 rclone remote |
+| `dest_path` | string | 本地绝对目标目录或直接 rclone remote |
 | `enabled` | bool | 是否启用；必须是 JSON boolean，不能写成字符串 |
 | `id` | string | 可选稳定规则 id；不填时根据 `source_path` + `dest_path` 自动生成 |
 
