@@ -32,21 +32,22 @@ This is not bidirectional sync, mirror sync, or delete sync.
 ## Files
 
 - `sync_daemon.py`: daemon runtime
-- `start.sh`: fresh install to `/opt/sync`
-- `update.sh`: update `/opt/sync/sync_daemon.py` and refresh `sync.service`
 - `config.json`: runtime config, auto-created if missing
 - `sync_state.json`: persisted file state
 - `sync.log`: single current log file, trimmed in place to the latest 24 hours
+- `tests/`: unit tests
 
 ## Quick Start
 
-Install:
+### Local Development
+
+Run directly:
 
 ```bash
-sudo ./start.sh
+python3 sync_daemon.py
 ```
 
-Edit `/opt/sync/config.json`:
+The daemon will create `config.json` if it doesn't exist. Edit it to configure your sync rules:
 
 ```json
 {
@@ -85,17 +86,55 @@ Edit `/opt/sync/config.json`:
 
 `dest_path` can also be a direct rclone remote, for example `"pikpak:Downloads"`.
 
-Restart:
+### Production Deployment with systemd
+
+1. Copy the daemon to your target directory (e.g., `/opt/sync`):
+
+```bash
+sudo mkdir -p /opt/sync
+sudo cp sync_daemon.py /opt/sync/
+sudo cp config.json /opt/sync/  # optional: if you have a pre-configured config
+```
+
+2. Create a systemd service file at `/etc/systemd/system/sync.service`:
+
+```ini
+[Unit]
+Description=Auto Download Sync Daemon
+After=network-online.target
+
+[Service]
+Type=notify
+WorkingDirectory=/opt/sync
+ExecStart=/usr/bin/python3 /opt/sync/sync_daemon.py
+Restart=always
+RestartSec=10
+WatchdogSec=300
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3. Enable and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable sync.service
+sudo systemctl start sync.service
+```
+
+4. Check status and logs:
+
+```bash
+sudo systemctl status sync.service
+sudo journalctl -u sync.service -f
+tail -f /opt/sync/sync.log
+```
+
+To restart after config changes:
 
 ```bash
 sudo systemctl restart sync.service
-```
-
-Follow logs:
-
-```bash
-sudo journalctl -u sync.service -f
-tail -f /opt/sync/sync.log
 ```
 
 ## Config
@@ -205,10 +244,14 @@ python3 -m unittest
 python3 sync_daemon.py
 ```
 
-## Updating
+## Updating Production
+
+To update the daemon in production:
 
 ```bash
-sudo ./update.sh
+sudo systemctl stop sync.service
+sudo cp sync_daemon.py /opt/sync/
+sudo systemctl start sync.service
 ```
 
-`update.sh` preserves `/opt/sync/config.json`.
+Your `config.json`, `sync_state.json`, and `sync.log` files are preserved.

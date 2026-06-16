@@ -36,21 +36,22 @@
 ## 项目文件
 
 - `sync_daemon.py`：守护进程主体
-- `start.sh`：安装到 `/opt/sync`
-- `update.sh`：更新 `/opt/sync/sync_daemon.py` 和 `sync.service`
 - `config.json`：运行配置，不存在时自动生成
 - `sync_state.json`：状态持久化
 - `sync.log`：单个当前日志文件，原地裁剪为最近 24 小时记录
+- `tests/`：单元测试
 
-## 安装
+## 快速开始
+
+### 本地开发运行
+
+直接运行：
 
 ```bash
-sudo ./start.sh
+python3 sync_daemon.py
 ```
 
-## 配置
-
-编辑 `/opt/sync/config.json`：
+如果不存在 `config.json`，守护进程会自动创建。编辑配置文件设置同步规则：
 
 ```json
 {
