@@ -15,12 +15,14 @@
 - 后续只处理新出现的文件，但会等 size/mtime 连续两次扫描稳定后再下载
 - 实际下载用 `rclone copyto`，会在目标目录下保留源端相对路径
 - 支持本地挂载目录和直接 rclone remote
-- 支持串行下载、重试、带宽限制
+- 支持可配置并发下载、重试、带宽限制
 - 保留源端子目录，避免同名文件互相覆盖
 - 新文件稳定后才会入队下载
 - 有下载任务活跃或排队时暂停扫描，等下载空闲后再检测新文件
 - 支持 systemd 保活和 watchdog
 - 单个 `sync.log` 文件原地裁剪，只保留最近 24 小时记录
+- Telegram Bot 菜单支持实时下载进度和规则状态查看
+- 每个下载子进程使用独立本地 Rclone RC 端口查询进度，避免默认 `localhost:5572` 冲突
 
 这不是双向同步，不是镜像同步，也不会删除目标目录文件。
 
@@ -62,7 +64,16 @@ sudo ./start.sh
     "enabled": false,
     "bot_token": "",
     "chat_id": "",
-    "message_thread_id": null
+    "message_thread_id": null,
+    "poll_timeout_seconds": 25,
+    "progress_refresh_seconds": 3,
+    "progress_live_seconds": 120
+  },
+  "rclone_rc": {
+    "host": "127.0.0.1",
+    "port_min": 0,
+    "port_max": 0,
+    "request_timeout_seconds": 2
   },
   "rules": [
     {
@@ -96,23 +107,36 @@ sudo systemctl restart sync.service
 |---|---|---|
 | `scan_interval_seconds` | int | 增量扫描间隔 |
 | `rclone_refresh_interval_seconds` | int | 刷新周期 |
-| `max_concurrent_downloads` | int | 为兼容旧配置保留；运行时固定单文件下载 |
+| `max_concurrent_downloads` | int | 下载 worker 数；`1` 时 Telegram 显示单任务进度条，大于 `1` 时显示活跃下载列表 |
 | `max_retry_count` | int | 正整数，达到 `permanent_failed` 前的失败阈值 |
 | `download_timeout_seconds` | int | 单次下载总超时；`0` 表示不启用守护进程侧总超时 |
 | `bandwidth_limit_mbps` | number | `0` 表示不限速，否则传给 `rclone --bwlimit` |
 | `rclone_command` | string | `rclone` 命令名或绝对路径 |
 | `rclone_service_name` | string | 刷新时要重启的 systemd unit；留空表示不重启服务 |
-| `telegram` | object | Telegram Bot 通知配置；每次 `rclone copyto` 成功后发送可读通知 |
+| `telegram` | object | Telegram Bot 配置；用于完成通知、长轮询命令、inline 按钮和进度视图 |
+| `rclone_rc` | object | 每个下载任务的本地 Rclone RC 配置，用于查询 `core/stats` 进度 |
 | `rules` | array | 下载规则列表 |
 
 Telegram 字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `enabled` | bool | 是否启用 Telegram 通知 |
+| `enabled` | bool | 是否启用 Telegram 通知和 Bot 长轮询 |
 | `bot_token` | string | Telegram Bot API token |
 | `chat_id` | string | 目标私聊、群组或频道 id |
 | `message_thread_id` | int/null | 可选的论坛话题 id；普通聊天填 `null` |
+| `poll_timeout_seconds` | int | `getUpdates` 长轮询超时；默认 `25` |
+| `progress_refresh_seconds` | int | 实时进度消息编辑间隔；默认 `3` |
+| `progress_live_seconds` | int | 点击 `Downloading` 后的最长实时刷新窗口；默认 `120` |
+
+Rclone RC 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `host` | string | 必须是 `127.0.0.1`；RC 不会绑定到非 loopback 地址 |
+| `port_min` | int | 可用 RC 端口下限；和 `port_max` 同为 `0` 时表示自动分配临时本地端口 |
+| `port_max` | int | 可用 RC 端口上限；和 `port_min` 同为 `0` 时表示自动分配临时本地端口 |
+| `request_timeout_seconds` | int | 守护进程请求每个下载任务 `core/stats` 的超时；默认 `2` |
 
 规则字段：
 
@@ -143,6 +167,15 @@ Telegram 字段：
 
 `observed` 表示守护进程已经看到新文件或已同步文件的新版本，但还不会立刻下载。只有下一次扫描发现 size/mtime 没变，才会进入 `pending` 并入队。
 
+Telegram：
+
+- `/start`、`/status`、`/menu` 会发送同一个 inline 菜单。
+- 菜单按钮为 `Downloading` 和 `States`。
+- 守护进程只响应配置中的 `chat_id`。
+- 如果配置了 `message_thread_id`，发送消息时会继续带上该 topic id。
+- `Downloading` 会读取每个活跃下载的 Rclone RC `core/stats`。单 worker 时显示类似 `██████░░░░ 63%` 的文本进度条；多个 worker 时按行显示每个活跃下载的速度和 ETA。
+- `States` 会展示所有规则、启用和初始化状态、源/目标路径、文件状态计数，以及最近一次扫描检查结果。
+
 目标目录结构：
 
 ```text
@@ -158,6 +191,13 @@ source_path: pikpak:
 3. 如果配置了 `rclone_service_name`，就执行 `systemctl restart <service>`。
 4. 轮询所有启用规则，等源端重新可用。
 5. 恢复扫描。
+
+## 安全说明
+
+- Rclone RC 只在每个 `rclone copyto` 子进程生命周期内启用。
+- 每个子进程使用独立的 `--rc-addr 127.0.0.1:<port>`，不会依赖或冲突默认 `127.0.0.1:5572`。
+- 守护进程会拒绝非 loopback RC host，也不会追加 `--rc-no-auth`。
+- 不要把 Telegram token、chat id、运行状态、活跃下载文件或日志提交到源码仓库。
 
 ## 日志和状态
 

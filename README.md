@@ -16,7 +16,7 @@ It watches one or more sources, records a baseline on first run, and only downlo
 - one-way incremental download only
 - supports local mount paths like `/mnt/pikpak/My Pack`
 - supports direct rclone remotes like `pikpak:My Pack`
-- serialized downloads with retry handling
+- configurable concurrent downloads with retry handling
 - preserves source subdirectories and avoids same-name file collisions
 - waits for new files to stabilize before downloading
 - scanning pauses while a download is active or queued
@@ -24,6 +24,8 @@ It watches one or more sources, records a baseline on first run, and only downlo
 - state persisted in JSON files under the working directory
 - single `sync.log` file trimmed in place to the latest 24 hours
 - native `systemd` `Type=notify` + watchdog support
+- Telegram Bot menu with live download progress and rule state views
+- per-transfer local Rclone RC ports for progress stats, avoiding `localhost:5572` conflicts
 
 This is not bidirectional sync, mirror sync, or delete sync.
 
@@ -60,7 +62,16 @@ Edit `/opt/sync/config.json`:
     "enabled": false,
     "bot_token": "",
     "chat_id": "",
-    "message_thread_id": null
+    "message_thread_id": null,
+    "poll_timeout_seconds": 25,
+    "progress_refresh_seconds": 3,
+    "progress_live_seconds": 120
+  },
+  "rclone_rc": {
+    "host": "127.0.0.1",
+    "port_min": 0,
+    "port_max": 0,
+    "request_timeout_seconds": 2
   },
   "rules": [
     {
@@ -91,23 +102,36 @@ tail -f /opt/sync/sync.log
 |---|---|---|
 | `scan_interval_seconds` | int | delay between incremental scans |
 | `rclone_refresh_interval_seconds` | int | delay between refresh cycles |
-| `max_concurrent_downloads` | int | kept for config compatibility; runtime forces single-file downloads |
+| `max_concurrent_downloads` | int | number of download workers; `1` shows a single live progress bar in Telegram, values above `1` show an active transfer list |
 | `max_retry_count` | int | positive failure threshold before `permanent_failed` |
 | `download_timeout_seconds` | int | total transfer timeout; `0` disables the daemon-side timeout |
 | `bandwidth_limit_mbps` | number | `0` disables `--bwlimit`; otherwise passed as `XM` |
 | `rclone_command` | string | `rclone` binary name or absolute path |
 | `rclone_service_name` | string | systemd unit restarted during refresh; leave empty to disable service restart |
-| `telegram` | object | Telegram Bot notification config; sends a readable message after each successful `rclone copyto` |
+| `telegram` | object | Telegram Bot config for completion notifications, long-polling commands, inline buttons, and progress views |
+| `rclone_rc` | object | per-download local Rclone RC config used to query `core/stats` progress |
 | `rules` | array | source-to-destination rules |
 
 Telegram fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `enabled` | bool | enables Telegram notifications |
+| `enabled` | bool | enables Telegram notifications and Bot long polling |
 | `bot_token` | string | Telegram Bot API token |
 | `chat_id` | string | target chat/channel/group id |
 | `message_thread_id` | int/null | optional forum topic id; use `null` for normal chats |
+| `poll_timeout_seconds` | int | long-poll timeout for `getUpdates`; default `25` |
+| `progress_refresh_seconds` | int | live progress edit interval; default `3` |
+| `progress_live_seconds` | int | maximum live refresh window after pressing `Downloading`; default `120` |
+
+Rclone RC fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `host` | string | must be `127.0.0.1`; RC is never bound to a non-loopback address |
+| `port_min` | int | first allowed RC port; `0` with `port_max=0` means allocate a temporary local port |
+| `port_max` | int | last allowed RC port; `0` with `port_min=0` means allocate a temporary local port |
+| `request_timeout_seconds` | int | timeout for daemon HTTP requests to each transfer's `core/stats`; default `2` |
 
 Rule fields:
 
@@ -138,6 +162,15 @@ new files -> observed -> pending -> synced
 
 `observed` means the daemon has seen a new or changed non-baseline file but has not downloaded it yet. It becomes `pending` only after size and mtime are unchanged across the next scan.
 
+Telegram:
+
+- `/start`, `/status`, and `/menu` send the same inline menu.
+- The menu has `Downloading` and `States` buttons.
+- The daemon only responds to the configured `chat_id`.
+- If `message_thread_id` is configured, outgoing messages continue to use that topic id.
+- `Downloading` reads each active transfer's Rclone RC `core/stats`. With one worker it shows a text progress bar such as `██████░░░░ 63%`; with multiple workers it shows one line per active transfer with speed and ETA.
+- `States` shows every rule, whether it is enabled and initialized, source/destination paths, file status counts, and the most recent scan check.
+
 Destination layout:
 
 ```text
@@ -152,6 +185,13 @@ Refresh flow:
 3. Restart `rclone_service_name` if configured.
 4. Probe all enabled sources until they are ready again.
 5. Resume scanning.
+
+## Security Notes
+
+- Rclone RC is started only for the lifetime of each `rclone copyto` child process.
+- Each child process gets its own `--rc-addr 127.0.0.1:<port>`, so the daemon does not depend on or conflict with the default `127.0.0.1:5572`.
+- The daemon rejects non-loopback RC hosts and does not add `--rc-no-auth`.
+- Keep Telegram bot tokens, chat ids, runtime state, active transfer files, and logs out of source control.
 
 ## Development
 

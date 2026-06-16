@@ -13,3 +13,5 @@ sync_state.json*
 sync.log*
 AGENTS.md
 web_panel/Caddyfile.example
+.DS_Store
+.DS_Store
