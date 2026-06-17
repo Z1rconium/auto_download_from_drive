@@ -29,6 +29,8 @@ LOG_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 ROTATED_LOG_NAME_RE = re.compile(rf"^{re.escape(LOG_FILE)}\.\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}$")
 SERVICE_NAME = "rclone-pikpak"
 FILE_STABILITY_SCAN_COUNT = 2
+TELEGRAM_MARKDOWN_PARSE_MODE = "MarkdownV2"
+TELEGRAM_MARKDOWN_V2_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 
 # Configuration limits
 MAX_SCAN_INTERVAL_SECONDS = 86400
@@ -137,6 +139,18 @@ def telegram_safe_truncate(message: str, max_chars: int = 4096) -> str:
         return message
     suffix = "..."
     return message[:max_chars - len(suffix)] + suffix
+
+
+def telegram_markdown_v2_escape(value: object) -> str:
+    return TELEGRAM_MARKDOWN_V2_ESCAPE_RE.sub(r"\\\1", str(value))
+
+
+def telegram_markdown_v2_safe_truncate(message: str, max_chars: int = 4096) -> str:
+    suffix = "\\.\\.\\."
+    if len(message) <= max_chars:
+        return message
+    truncated = message[:max_chars - len(suffix)].rstrip("\\")
+    return truncated + suffix
 
 
 def format_speed_binary(bytes_per_second: object) -> str:
@@ -277,6 +291,10 @@ def _format_bool(value: object) -> str:
     return "yes" if value else "no"
 
 
+def _format_markdown_field(label: str, value: object) -> str:
+    return f"*{label}:* {telegram_markdown_v2_escape(value)}"
+
+
 def _safe_int(value: object) -> int:
     try:
         return int(value or 0)
@@ -284,8 +302,10 @@ def _safe_int(value: object) -> int:
         return 0
 
 
-def _format_last_check(last_check: object) -> List[str]:
+def _format_last_check(last_check: object, markdown: bool = False) -> List[str]:
     if not isinstance(last_check, dict):
+        if markdown:
+            return [_format_markdown_field("Last check", "never")]
         return ["Last check: never"]
 
     kind = str(last_check.get("kind") or "unknown")
@@ -293,15 +313,29 @@ def _format_last_check(last_check: object) -> List[str]:
     source_ready = _format_bool(last_check.get("source_ready"))
     duration = last_check.get("duration_seconds")
     duration_text = f"{duration}s" if duration is not None else "n/a"
+    files_text = (
+        f"discovered {_safe_int(last_check.get('discovered_files'))}, "
+        f"new {_safe_int(last_check.get('new_files'))}, "
+        f"removed {_safe_int(last_check.get('removed_files'))}, "
+        f"queued {_safe_int(last_check.get('queued_files'))}"
+    )
+
+    if markdown:
+        lines = [
+            _format_markdown_field(
+                "Last check",
+                f"{kind} | success {success} | source ready {source_ready} | {duration_text}",
+            ),
+            _format_markdown_field("Files", files_text),
+        ]
+        error = str(last_check.get("error") or "").strip()
+        if error:
+            lines.append(_format_markdown_field("Error", error))
+        return lines
+
     lines = [
         f"Last check: {kind} | success {success} | source ready {source_ready} | {duration_text}",
-        (
-            "Files: "
-            f"discovered {_safe_int(last_check.get('discovered_files'))}, "
-            f"new {_safe_int(last_check.get('new_files'))}, "
-            f"removed {_safe_int(last_check.get('removed_files'))}, "
-            f"queued {_safe_int(last_check.get('queued_files'))}"
-        ),
+        f"Files: {files_text}",
     ]
     error = str(last_check.get("error") or "").strip()
     if error:
@@ -309,16 +343,19 @@ def _format_last_check(last_check: object) -> List[str]:
     return lines
 
 
-def format_rules_state_view(rules: List[Rule], state: Dict[str, object]) -> str:
+def format_rules_state_view(rules: List[Rule], state: Dict[str, object], markdown: bool = True) -> str:
     rules_state = state.get("rules", {}) if isinstance(state, dict) else {}
     if not isinstance(rules_state, dict):
         rules_state = {}
 
-    lines = ["States"]
+    lines = ["*States*" if markdown else "States"]
     if not rules:
         lines.append("")
-        lines.append("No rules configured.")
-        return telegram_safe_truncate("\n".join(lines))
+        lines.append(telegram_markdown_v2_escape("No rules configured.") if markdown else "No rules configured.")
+        message = "\n".join(lines)
+        if markdown:
+            return telegram_markdown_v2_safe_truncate(message)
+        return telegram_safe_truncate(message)
 
     for rule in rules:
         rule_state = rules_state.get(rule.rule_id, {})
@@ -343,6 +380,16 @@ def format_rules_state_view(rules: List[Rule], state: Dict[str, object]) -> str:
             status_parts.append(f"unknown {unknown_count}")
 
         lines.append("")
+        if markdown:
+            rule_status = "enabled" if rule.enabled else "disabled"
+            lines.append(f"*{telegram_markdown_v2_escape(rule.rule_id)}* \\[{rule_status}\\]")
+            lines.append(_format_markdown_field("Initialized", _format_bool(rule_state.get("initialized"))))
+            lines.append(_format_markdown_field("Source", rule.source_path))
+            lines.append(_format_markdown_field("Dest", rule.dest_path))
+            lines.append(_format_markdown_field("Status", ", ".join(status_parts)))
+            lines.extend(_format_last_check(rule_state.get("last_check"), markdown=True))
+            continue
+
         lines.append(f"{rule.rule_id} [{'enabled' if rule.enabled else 'disabled'}]")
         lines.append(f"Initialized: {_format_bool(rule_state.get('initialized'))}")
         lines.append(f"Source: {rule.source_path}")
@@ -350,7 +397,10 @@ def format_rules_state_view(rules: List[Rule], state: Dict[str, object]) -> str:
         lines.append("Status: " + ", ".join(status_parts))
         lines.extend(_format_last_check(rule_state.get("last_check")))
 
-    return telegram_safe_truncate("\n".join(lines))
+    message = "\n".join(lines)
+    if markdown:
+        return telegram_markdown_v2_safe_truncate(message)
+    return telegram_safe_truncate(message)
 
 
 class RecentLogFileHandler(logging.FileHandler):
@@ -1836,7 +1886,13 @@ class SyncDaemon:
 
         if data == "states":
             text = self._build_rules_state_view()
-            self._edit_telegram_message(chat_id, message_id, text, self._telegram_menu_markup())
+            self._edit_telegram_message(
+                chat_id,
+                message_id,
+                text,
+                self._telegram_menu_markup(),
+                parse_mode=TELEGRAM_MARKDOWN_PARSE_MODE,
+            )
 
     def _telegram_menu_markup(self) -> Dict[str, object]:
         return {
@@ -1918,6 +1974,7 @@ class SyncDaemon:
         chat_id: Optional[str] = None,
         message_thread_id: Optional[int] = None,
         use_config_thread: bool = True,
+        parse_mode: Optional[str] = None,
     ) -> Optional[Dict[str, object]]:
         telegram = self.config.get("telegram", {})
         if not isinstance(telegram, dict):
@@ -1943,6 +2000,8 @@ class SyncDaemon:
             payload["message_thread_id"] = target_message_thread_id
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
 
         result = self._telegram_api_request("sendMessage", payload, timeout=10)
         if result:
@@ -1955,6 +2014,7 @@ class SyncDaemon:
         message_id: int,
         message: str,
         reply_markup: Optional[Dict[str, object]] = None,
+        parse_mode: Optional[str] = None,
     ) -> Optional[Dict[str, object]]:
         payload: Dict[str, object] = {
             "chat_id": chat_id,
@@ -1964,6 +2024,8 @@ class SyncDaemon:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         return self._telegram_api_request("editMessageText", payload, timeout=10)
 
     def _answer_telegram_callback(self, callback_id: str) -> Optional[Dict[str, object]]:
