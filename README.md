@@ -232,6 +232,7 @@ Refresh flow:
 - Rclone RC is started only for the lifetime of each `rclone copyto` child process.
 - Each child process gets its own `--rc-addr 127.0.0.1:<port>`, so the daemon does not depend on or conflict with the default `127.0.0.1:5572`.
 - The daemon rejects non-loopback RC hosts and does not add `--rc-no-auth`.
+- Runtime files created by the daemon (`config.json`, `sync_state.json`, `sync.log`) are restricted to owner read/write permissions.
 - Keep Telegram bot tokens, chat ids, runtime state, active transfer files, and logs out of source control.
 
 ## Development

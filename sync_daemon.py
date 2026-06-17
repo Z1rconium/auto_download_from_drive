@@ -6,6 +6,7 @@ import queue
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -31,6 +32,8 @@ SERVICE_NAME = "rclone-pikpak"
 FILE_STABILITY_SCAN_COUNT = 2
 TELEGRAM_MARKDOWN_PARSE_MODE = "MarkdownV2"
 TELEGRAM_MARKDOWN_V2_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_FILE_OPEN_FLAGS = getattr(os, "O_NOFOLLOW", 0)
 
 # Configuration limits
 MAX_SCAN_INTERVAL_SECONDS = 86400
@@ -151,6 +154,56 @@ def telegram_markdown_v2_safe_truncate(message: str, max_chars: int = 4096) -> s
         return message
     truncated = message[:max_chars - len(suffix)].rstrip("\\")
     return truncated + suffix
+
+
+def ensure_private_file_permissions(path: Path) -> None:
+    try:
+        file_stat = path.lstat()
+    except FileNotFoundError:
+        return
+
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise RuntimeError(f"{path} must be a regular file")
+    os.chmod(path, PRIVATE_FILE_MODE)
+
+
+def prepare_private_file(path: Path) -> None:
+    ensure_private_file_permissions(path)
+    if path.exists():
+        return
+
+    try:
+        fd = os.open(
+            str(path),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | PRIVATE_FILE_OPEN_FLAGS,
+            PRIVATE_FILE_MODE,
+        )
+    except FileExistsError:
+        ensure_private_file_permissions(path)
+        return
+
+    try:
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+    finally:
+        os.close(fd)
+
+
+def open_private_text_for_write(path: Path):
+    ensure_private_file_permissions(path)
+    fd = os.open(
+        str(path),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | PRIVATE_FILE_OPEN_FLAGS,
+        PRIVATE_FILE_MODE,
+    )
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise RuntimeError(f"{path} must be a regular file")
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+        return os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def format_speed_binary(bytes_per_second: object) -> str:
@@ -529,6 +582,8 @@ class SyncDaemon:
             handler.close()
         logger.handlers.clear()
 
+        prepare_private_file(self.log_path)
+
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)s %(event_type)s %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S%z",
@@ -705,9 +760,10 @@ class SyncDaemon:
 
     def ensure_config(self) -> bool:
         if self.config_path.exists():
+            ensure_private_file_permissions(self.config_path)
             return True
 
-        with self.config_path.open("w", encoding="utf-8") as fp:
+        with open_private_text_for_write(self.config_path) as fp:
             json.dump(DEFAULT_CONFIG, fp, indent=2)
             fp.write("\n")
 
@@ -719,6 +775,7 @@ class SyncDaemon:
         return False
 
     def load_config(self) -> None:
+        ensure_private_file_permissions(self.config_path)
         with self.config_path.open("r", encoding="utf-8") as fp:
             cfg = json.load(fp)
 
@@ -900,6 +957,7 @@ class SyncDaemon:
             self.save_state()
             return
 
+        ensure_private_file_permissions(self.state_path)
         try:
             with self.state_path.open("r", encoding="utf-8") as fp:
                 self.state = json.load(fp)
@@ -907,6 +965,7 @@ class SyncDaemon:
             backup_path = self.state_path.with_suffix(".json.bak")
             self.log_error(EventType.ERROR, "failed to load state, trying backup", error=str(exc))
             if backup_path.exists():
+                ensure_private_file_permissions(backup_path)
                 with backup_path.open("r", encoding="utf-8") as fp:
                     self.state = json.load(fp)
                 self.log_event(EventType.SYSTEM, "state restored from backup", backup=str(backup_path))
@@ -926,13 +985,15 @@ class SyncDaemon:
                     if bak_path.exists():
                         bak_path.unlink()
                     os.replace(self.state_path, bak_path)
+                    ensure_private_file_permissions(bak_path)
                 except OSError as exc:
                     self.log_error(EventType.ERROR, "failed to create state backup", error=str(exc))
 
-            with tmp_path.open("w", encoding="utf-8") as fp:
+            with open_private_text_for_write(tmp_path) as fp:
                 json.dump(self.state, fp, indent=2)
                 fp.write("\n")
             os.replace(tmp_path, self.state_path)
+            ensure_private_file_permissions(self.state_path)
 
     def _signal_handler(self, signum: int, _frame: object) -> None:
         # Signal handlers should only set flags to avoid calling non-async-safe functions

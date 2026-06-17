@@ -202,6 +202,7 @@ source_path: pikpak:
 - Rclone RC 只在每个 `rclone copyto` 子进程生命周期内启用。
 - 每个子进程使用独立的 `--rc-addr 127.0.0.1:<port>`，不会依赖或冲突默认 `127.0.0.1:5572`。
 - 守护进程会拒绝非 loopback RC host，也不会追加 `--rc-no-auth`。
+- 守护进程创建的运行期文件（`config.json`、`sync_state.json`、`sync.log`）会限制为仅 owner 可读写。
 - 不要把 Telegram token、chat id、运行状态、活跃下载文件或日志提交到源码仓库。
 
 ## 日志和状态
