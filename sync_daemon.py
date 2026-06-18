@@ -52,6 +52,7 @@ MAX_TELEGRAM_PROGRESS_LIVE_SECONDS = 3600
 MAX_TELEGRAM_RCLONE_STATS_WORKERS = 32
 MAX_RCLONE_RC_REQUEST_TIMEOUT_SECONDS = 60
 MAX_RCLONE_RC_PORT = 65535
+TELEGRAM_LIVE_PROGRESS_INTERVAL_SECONDS = 1
 RCLONE_RC_ADDRESS_IN_USE_MARKERS = (
     "address already in use",
     "address-in-use",
@@ -74,7 +75,7 @@ DEFAULT_CONFIG = {
         "chat_id": "",
         "message_thread_id": None,
         "poll_timeout_seconds": 25,
-        "progress_refresh_seconds": 3,
+        "progress_refresh_seconds": 1,
         "progress_live_seconds": 120
     },
     "rclone_rc": {
@@ -270,29 +271,53 @@ def _transfer_stats_entry(stats: Dict[str, Any]) -> Dict[str, Any]:
     return stats
 
 
+def _first_positive_float(*values: object) -> Optional[float]:
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return None
+
+
 def _stats_percentage(stats: Dict[str, Any]) -> object:
+    total_bytes = _first_positive_float(stats.get("totalBytes"), stats.get("size"))
+    if total_bytes is not None:
+        try:
+            return (float(stats.get("bytes") or 0) / total_bytes) * 100.0
+        except (TypeError, ValueError):
+            pass
+
     entry = _transfer_stats_entry(stats)
     if "percentage" in entry:
         return entry.get("percentage")
 
-    bytes_done = entry.get("bytes", stats.get("bytes"))
-    total_bytes = entry.get("size", stats.get("totalBytes"))
+    bytes_done = entry.get("bytes")
+    entry_total_bytes = _first_positive_float(entry.get("size"), entry.get("totalBytes"))
     try:
-        if total_bytes and float(total_bytes) > 0:
-            return (float(bytes_done or 0) / float(total_bytes)) * 100.0
+        if entry_total_bytes is not None:
+            return (float(bytes_done or 0) / entry_total_bytes) * 100.0
     except (TypeError, ValueError):
         pass
     return 0
 
 
 def _stats_speed(stats: Dict[str, Any]) -> object:
+    if "speed" in stats:
+        return stats.get("speed")
+    if "speedAvg" in stats:
+        return stats.get("speedAvg")
     entry = _transfer_stats_entry(stats)
-    return entry.get("speedAvg", entry.get("speed", stats.get("speed", 0)))
+    return entry.get("speedAvg", entry.get("speed", 0))
 
 
 def _stats_eta(stats: Dict[str, Any]) -> object:
+    if "eta" in stats:
+        return stats.get("eta")
     entry = _transfer_stats_entry(stats)
-    return entry.get("eta", stats.get("eta"))
+    return entry.get("eta")
 
 
 def _display_path_tail(path: str) -> str:
@@ -305,20 +330,24 @@ def format_downloading_view(
     stats_by_key: Dict[str, Dict[str, Any]],
     max_concurrent_downloads: int,
     queued_count: int,
+    active_count: Optional[int] = None,
 ) -> str:
-    active_count = len(transfers)
+    display_active_count = len(transfers) if active_count is None else active_count
     lines = [
         "Downloading",
-        f"Active: {active_count} | Queued: {queued_count}",
+        f"Active: {display_active_count} | Queued: {queued_count}",
     ]
 
     if not transfers:
         lines.append("")
-        lines.append("No active downloads.")
+        if display_active_count > 0:
+            lines.append("Download is starting or finalizing.")
+        else:
+            lines.append("No active downloads.")
         return telegram_safe_truncate("\n".join(lines))
 
     lines.append("")
-    if max_concurrent_downloads == 1 and active_count == 1:
+    if max_concurrent_downloads == 1 and len(transfers) == 1:
         transfer = transfers[0]
         key = f"{transfer.rule_id}:{transfer.source_file}"
         stats = stats_by_key.get(key, {})
@@ -341,6 +370,9 @@ def format_downloading_view(
             continue
         progress = format_progress_bar(_stats_percentage(stats), width=6).split()[-1]
         lines.append(f"  {format_speed_binary(_stats_speed(stats))} | ETA {format_eta(_stats_eta(stats))} | {progress}")
+    preparing_count = display_active_count - len(transfers)
+    if preparing_count > 0:
+        lines.append(f"- {preparing_count} active download(s) preparing stats")
 
     return telegram_safe_truncate("\n".join(lines))
 
@@ -577,6 +609,9 @@ class SyncDaemon:
         self.reserved_rc_ports = set()
         self.telegram_thread: Optional[threading.Thread] = None
         self.telegram_update_offset: Optional[int] = None
+        self.telegram_edit_lock = threading.Lock()
+        self.telegram_live_progress_lock = threading.Lock()
+        self.telegram_live_progress_sessions: Dict[Tuple[str, int], int] = {}
         self.systemd_notify_socket = os.environ.get("NOTIFY_SOCKET", "").strip()
         watchdog_usec = os.environ.get("WATCHDOG_USEC", "").strip()
         self.systemd_watchdog_interval = self._parse_watchdog_interval(watchdog_usec)
@@ -940,7 +975,9 @@ class SyncDaemon:
         bot_token = str(telegram_cfg.get("bot_token", "")).strip()
         chat_id = str(telegram_cfg.get("chat_id", "")).strip()
         poll_timeout = int(telegram_cfg.get("poll_timeout_seconds", 25))
-        progress_refresh = int(telegram_cfg.get("progress_refresh_seconds", 3))
+        progress_refresh = int(
+            telegram_cfg.get("progress_refresh_seconds", TELEGRAM_LIVE_PROGRESS_INTERVAL_SECONDS)
+        )
         progress_live = int(telegram_cfg.get("progress_live_seconds", 120))
         message_thread_id_raw = telegram_cfg.get("message_thread_id", None)
         message_thread_id = None
@@ -955,6 +992,7 @@ class SyncDaemon:
             raise ValueError(
                 f"telegram.progress_refresh_seconds must be <= {MAX_TELEGRAM_PROGRESS_REFRESH_SECONDS}"
             )
+        progress_refresh = min(progress_refresh, TELEGRAM_LIVE_PROGRESS_INTERVAL_SECONDS)
         if progress_live < 0:
             raise ValueError("telegram.progress_live_seconds must be >= 0")
         if progress_live > MAX_TELEGRAM_PROGRESS_LIVE_SECONDS:
@@ -1874,9 +1912,9 @@ class SyncDaemon:
         text = f"{stdout}\n{stderr}".lower()
         return any(marker in text for marker in RCLONE_RC_ADDRESS_IN_USE_MARKERS)
 
-    def _active_transfer_snapshot(self) -> Tuple[List[Tuple[str, ActiveTransfer]], int]:
+    def _active_transfer_snapshot(self) -> Tuple[List[Tuple[str, ActiveTransfer]], int, int]:
         with self.queue_lock:
-            return list(self.active_transfers.items()), self.download_queue.qsize()
+            return list(self.active_transfers.items()), self.download_queue.qsize(), self.active_downloads
 
     def _fetch_rclone_stats(self, rc_url: str) -> Dict[str, Any]:
         rc_config = self.config.get("rclone_rc", {})
@@ -1910,7 +1948,7 @@ class SyncDaemon:
         return result
 
     def _build_downloading_view(self) -> str:
-        snapshot, queued_count = self._active_transfer_snapshot()
+        snapshot, queued_count, active_count = self._active_transfer_snapshot()
         transfers = [transfer for _key, transfer in snapshot]
         stats_by_key = self._fetch_active_rclone_stats(snapshot)
 
@@ -1919,6 +1957,7 @@ class SyncDaemon:
             stats_by_key,
             int(self.config.get("max_concurrent_downloads", 1)),
             queued_count,
+            active_count,
         )
 
     def _fetch_active_rclone_stats(self, snapshot: List[Tuple[str, ActiveTransfer]]) -> Dict[str, Dict[str, Any]]:
@@ -2179,12 +2218,26 @@ class SyncDaemon:
 
         data = str(callback_query.get("data") or "")
         if data == "downloading":
+            live_session = self._open_telegram_live_progress_session(chat_id, message_id)
             text = self._build_downloading_view()
-            self._edit_telegram_message(chat_id, message_id, text, self._telegram_menu_markup())
-            self._start_telegram_live_progress(chat_id, message_id)
+            if live_session is None:
+                self._edit_telegram_message(chat_id, message_id, text, self._telegram_menu_markup())
+                return
+
+            session_key, session_id = live_session
+            self._edit_telegram_live_progress_message(
+                session_key,
+                session_id,
+                chat_id,
+                message_id,
+                text,
+                self._telegram_menu_markup(),
+            )
+            self._start_telegram_live_progress(chat_id, message_id, session_key, session_id, text)
             return
 
         if data == "states":
+            self._cancel_telegram_live_progress(chat_id, message_id)
             text = self._build_rules_state_view()
             self._edit_telegram_message(
                 chat_id,
@@ -2237,35 +2290,124 @@ class SyncDaemon:
             use_config_thread=use_config_thread,
         )
 
-    def _start_telegram_live_progress(self, chat_id: str, message_id: int) -> None:
+    def _open_telegram_live_progress_session(
+        self,
+        chat_id: str,
+        message_id: int,
+    ) -> Optional[Tuple[Tuple[str, int], int]]:
         telegram = self.config.get("telegram", {})
         if not isinstance(telegram, dict):
-            return
+            return None
         live_seconds = int(telegram.get("progress_live_seconds", 120))
         if live_seconds <= 0:
-            return
+            self._cancel_telegram_live_progress(chat_id, message_id)
+            return None
 
+        session_key = (chat_id, message_id)
+        with self.telegram_live_progress_lock:
+            session_id = self.telegram_live_progress_sessions.get(session_key, 0) + 1
+            self.telegram_live_progress_sessions[session_key] = session_id
+        return session_key, session_id
+
+    def _cancel_telegram_live_progress(self, chat_id: str, message_id: int) -> None:
+        with self.telegram_live_progress_lock:
+            self.telegram_live_progress_sessions.pop((chat_id, message_id), None)
+
+    def _telegram_live_progress_is_current(self, session_key: Tuple[str, int], session_id: int) -> bool:
+        with self.telegram_live_progress_lock:
+            return self.telegram_live_progress_sessions.get(session_key) == session_id
+
+    def _clear_telegram_live_progress_session(self, session_key: Tuple[str, int], session_id: int) -> None:
+        with self.telegram_live_progress_lock:
+            if self.telegram_live_progress_sessions.get(session_key) == session_id:
+                self.telegram_live_progress_sessions.pop(session_key, None)
+
+    def _start_telegram_live_progress(
+        self,
+        chat_id: str,
+        message_id: int,
+        session_key: Tuple[str, int],
+        session_id: int,
+        initial_text: str,
+    ) -> None:
         thread = threading.Thread(
             target=self._telegram_live_progress_loop,
-            args=(chat_id, message_id, live_seconds),
+            args=(chat_id, message_id, session_key, session_id, initial_text),
             name="telegram-live-progress",
             daemon=True,
         )
         thread.start()
 
-    def _telegram_live_progress_loop(self, chat_id: str, message_id: int, live_seconds: int) -> None:
-        telegram = self.config.get("telegram", {})
-        refresh_seconds = 3
-        if isinstance(telegram, dict):
-            refresh_seconds = int(telegram.get("progress_refresh_seconds", 3))
+    def _telegram_live_progress_loop(
+        self,
+        chat_id: str,
+        message_id: int,
+        session_key: Tuple[str, int],
+        session_id: int,
+        initial_text: str,
+    ) -> None:
+        last_text = initial_text
+        idle_refresh_failures = 0
+        next_refresh_at = time.monotonic() + TELEGRAM_LIVE_PROGRESS_INTERVAL_SECONDS
+        try:
+            while self._telegram_live_progress_is_current(session_key, session_id):
+                wait_seconds = max(0.0, next_refresh_at - time.monotonic())
+                if self.stop_event.wait(wait_seconds):
+                    return
+                next_refresh_at += TELEGRAM_LIVE_PROGRESS_INTERVAL_SECONDS
 
-        deadline = time.time() + live_seconds
-        while time.time() < deadline and not self.stop_event.wait(refresh_seconds):
-            text = self._build_downloading_view()
-            self._edit_telegram_message(chat_id, message_id, text, self._telegram_menu_markup())
-            snapshot, _queued = self._active_transfer_snapshot()
-            if not snapshot:
-                return
+                if not self._telegram_live_progress_is_current(session_key, session_id):
+                    return
+
+                text = self._build_downloading_view()
+                if not self._telegram_live_progress_is_current(session_key, session_id):
+                    return
+
+                text_sent = text == last_text
+                if text != last_text:
+                    result = self._edit_telegram_live_progress_message(
+                        session_key,
+                        session_id,
+                        chat_id,
+                        message_id,
+                        text,
+                        self._telegram_menu_markup(),
+                    )
+                    if result is not None:
+                        last_text = text
+                        text_sent = True
+
+                active_downloads, queued_downloads = self.get_download_counters()
+                if active_downloads == 0 and queued_downloads == 0:
+                    idle_text = self._build_downloading_view()
+                    if idle_text != text:
+                        text = idle_text
+                        text_sent = text == last_text
+                        if text != last_text:
+                            result = self._edit_telegram_live_progress_message(
+                                session_key,
+                                session_id,
+                                chat_id,
+                                message_id,
+                                text,
+                                self._telegram_menu_markup(),
+                            )
+                            if result is not None:
+                                last_text = text
+                                text_sent = True
+
+                    if text_sent:
+                        return
+                    idle_refresh_failures += 1
+                    if idle_refresh_failures >= 3:
+                        return
+                else:
+                    idle_refresh_failures = 0
+
+                if next_refresh_at < time.monotonic():
+                    next_refresh_at = time.monotonic()
+        finally:
+            self._clear_telegram_live_progress_session(session_key, session_id)
 
     def _send_telegram_message(
         self,
@@ -2309,6 +2451,31 @@ class SyncDaemon:
         return result
 
     def _edit_telegram_message(
+        self,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup: Optional[Dict[str, object]] = None,
+        parse_mode: Optional[str] = None,
+    ) -> Optional[Dict[str, object]]:
+        with self.telegram_edit_lock:
+            return self._edit_telegram_message_unlocked(chat_id, message_id, message, reply_markup, parse_mode)
+
+    def _edit_telegram_live_progress_message(
+        self,
+        session_key: Tuple[str, int],
+        session_id: int,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup: Optional[Dict[str, object]] = None,
+    ) -> Optional[Dict[str, object]]:
+        with self.telegram_edit_lock:
+            if not self._telegram_live_progress_is_current(session_key, session_id):
+                return None
+            return self._edit_telegram_message_unlocked(chat_id, message_id, message, reply_markup)
+
+    def _edit_telegram_message_unlocked(
         self,
         chat_id: str,
         message_id: int,

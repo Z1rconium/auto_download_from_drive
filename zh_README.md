@@ -71,7 +71,7 @@ python3 sync_daemon.py
     "chat_id": "",
     "message_thread_id": null,
     "poll_timeout_seconds": 25,
-    "progress_refresh_seconds": 3,
+    "progress_refresh_seconds": 1,
     "progress_live_seconds": 120
   },
   "rclone_rc": {
@@ -133,8 +133,8 @@ Telegram 字段：
 | `chat_id` | string | 目标私聊、群组或频道 id |
 | `message_thread_id` | int/null | 可选的论坛话题 id；普通聊天填 `null` |
 | `poll_timeout_seconds` | int | `getUpdates` 长轮询超时；默认 `25` |
-| `progress_refresh_seconds` | int | 实时进度消息编辑间隔；默认 `3` |
-| `progress_live_seconds` | int | 点击 `Downloading` 后的最长实时刷新窗口；默认 `120` |
+| `progress_refresh_seconds` | int | 实时进度消息编辑间隔；默认 `1`；配置大于 1 秒时会按 1 秒执行 |
+| `progress_live_seconds` | int | 点击 `Downloading` 后的实时进度开关；默认 `120`，设为 `0` 表示关闭；有活跃或排队下载时会刷新到空闲，确保最终显示 `0/0` |
 
 Rclone RC 字段：
 

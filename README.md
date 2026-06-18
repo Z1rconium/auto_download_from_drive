@@ -66,7 +66,7 @@ The daemon will create `config.json` if it doesn't exist. Edit it to configure y
     "chat_id": "",
     "message_thread_id": null,
     "poll_timeout_seconds": 25,
-    "progress_refresh_seconds": 3,
+    "progress_refresh_seconds": 1,
     "progress_live_seconds": 120
   },
   "rclone_rc": {
@@ -163,8 +163,8 @@ Telegram fields:
 | `chat_id` | string | target chat/channel/group id |
 | `message_thread_id` | int/null | optional forum topic id; use `null` for normal chats |
 | `poll_timeout_seconds` | int | long-poll timeout for `getUpdates`; default `25` |
-| `progress_refresh_seconds` | int | live progress edit interval; default `3` |
-| `progress_live_seconds` | int | maximum live refresh window after pressing `Downloading`; default `120` |
+| `progress_refresh_seconds` | int | live progress edit interval; default `1`; larger configured values are clamped to 1 second |
+| `progress_live_seconds` | int | live progress switch after pressing `Downloading`; default `120`, set `0` to disable; active or queued downloads refresh until idle so the final `0/0` state is shown |
 
 Rclone RC fields:
 
