@@ -14,7 +14,7 @@
 - 首次扫描只建立基线，不回补历史文件
 - 后续只处理新出现的文件，但会等 size/mtime 连续两次扫描稳定后再下载
 - 新出现的文件夹会作为一个整体同步任务处理，不会给文件夹里的每个文件单独建任务
-- 文件下载用 `rclone copyto`，文件夹下载用 `rclone copy`，会在目标目录下保留源端相对路径
+- 文件和文件夹下载都使用 `rclone copy`，会在目标目录下保留源端相对路径
 - 支持本地绝对路径和直接 rclone remote
 - 支持可配置并发下载、重试、带宽限制
 - 保留源端子目录，避免同名文件互相覆盖
@@ -203,7 +203,7 @@ source_path: pikpak:
 
 ## 安全说明
 
-- Rclone RC 只在每个 `rclone copyto` 子进程生命周期内启用。
+- Rclone RC 只在每个 `rclone copy` 子进程生命周期内启用。
 - 每个子进程使用独立的 `--rc-addr 127.0.0.1:<port>`，不会依赖或冲突默认 `127.0.0.1:5572`。
 - 守护进程会拒绝非 loopback RC host，也不会追加 `--rc-no-auth`。
 - 守护进程创建的运行期文件（`config.json`、`sync_state.json`、`sync.log`）会限制为仅 owner 可读写。

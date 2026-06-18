@@ -713,6 +713,21 @@ class SyncDaemon:
             return self._join_remote_path(dest_root, "/".join(path_parts))
         return str(self._dest_file_path(dest_root, relative_path))
 
+    def _dest_directory_target(self, dest_root: str, relative_path: str) -> str:
+        if is_rclone_remote(dest_root):
+            path_parts = self._validated_relative_path_parts(relative_path) if relative_path else ()
+            if not path_parts:
+                return dest_root.rstrip("/")
+            return self._join_remote_path(dest_root, "/".join(path_parts))
+        if not relative_path:
+            return str(Path(dest_root).resolve())
+        return str(self._dest_file_path(dest_root, relative_path))
+
+    def _dest_parent_target(self, dest_root: str, relative_path: str) -> str:
+        path_parts = self._validated_relative_path_parts(relative_path)
+        parent_relative_path = "/".join(path_parts[:-1])
+        return self._dest_directory_target(dest_root, parent_relative_path)
+
     def _normalized_relative_path(self, relative_path: str) -> str:
         return str(relative_path).replace("\\", "/").strip("/")
 
@@ -1880,17 +1895,13 @@ class SyncDaemon:
     def _build_rclone_copy_command(
         self,
         source_file: str,
-        dest_file: str,
+        dest_target: str,
         rc_addr: str,
         entry_type: str,
     ) -> List[str]:
+        command = [self.config["rclone_command"], "copy", source_file, dest_target]
         if entry_type == ENTRY_TYPE_DIRECTORY:
-            command = [
-                self.config["rclone_command"], "copy", source_file, dest_file,
-                "--create-empty-src-dirs",
-            ]
-        else:
-            command = [self.config["rclone_command"], "copyto", source_file, dest_file]
+            command.append("--create-empty-src-dirs")
 
         command.extend([
             "--rc",
@@ -1902,6 +1913,9 @@ class SyncDaemon:
             "--low-level-retries", "20",
             "--timeout", "1m",
             "--contimeout", "15s",
+            "--stats", "1s",
+            "--log-level", "DEBUG",
+            "--log-file", "/tmp/rclone-pikpak-debug.log",
         ])
         bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
         if bandwidth_limit > 0:
@@ -2622,6 +2636,9 @@ class SyncDaemon:
 
         try:
             dest_file = self._dest_file_target(dest_path, task.relative_path)
+            dest_target = dest_file
+            if entry_type != ENTRY_TYPE_DIRECTORY:
+                dest_target = self._dest_parent_target(dest_path, task.relative_path)
             if not is_rclone_remote(dest_path):
                 if entry_type == ENTRY_TYPE_DIRECTORY:
                     Path(dest_file).mkdir(parents=True, exist_ok=True)
@@ -2658,7 +2675,7 @@ class SyncDaemon:
                     host = str(rc_config.get("host", "127.0.0.1"))
                 rc_addr = f"{host}:{rc_port}"
                 rc_url = f"http://{rc_addr}"
-                command = self._build_rclone_copy_command(source_file, dest_file, rc_addr, entry_type)
+                command = self._build_rclone_copy_command(source_file, dest_target, rc_addr, entry_type)
 
                 process = subprocess.Popen(
                     command,

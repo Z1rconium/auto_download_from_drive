@@ -9,7 +9,7 @@
 
 `auto_download_from_drive` is a lightweight Linux daemon driven entirely by [`sync_daemon.py`](./sync_daemon.py).
 
-It watches one or more sources, records a baseline on first run, and only downloads files discovered later after their size and mtime are stable across two scans. If a new folder appears, it queues one folder transfer instead of one task per child file. File transfers use `rclone copyto`; folder transfers use `rclone copy` so the source directory layout is preserved under the destination.
+It watches one or more sources, records a baseline on first run, and only downloads files discovered later after their size and mtime are stable across two scans. If a new folder appears, it queues one folder transfer instead of one task per child file. Downloads use `rclone copy` so the source directory layout is preserved under the destination.
 
 ## Features
 
@@ -232,7 +232,7 @@ Refresh flow:
 
 ## Security Notes
 
-- Rclone RC is started only for the lifetime of each `rclone copyto` child process.
+- Rclone RC is started only for the lifetime of each `rclone copy` child process.
 - Each child process gets its own `--rc-addr 127.0.0.1:<port>`, so the daemon does not depend on or conflict with the default `127.0.0.1:5572`.
 - The daemon rejects non-loopback RC hosts and does not add `--rc-no-auth`.
 - Runtime files created by the daemon (`config.json`, `sync_state.json`, `sync.log`) are restricted to owner read/write permissions.
