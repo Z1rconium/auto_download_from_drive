@@ -9,7 +9,7 @@
 
 `auto_download_from_drive` is a lightweight Linux daemon driven entirely by [`sync_daemon.py`](./sync_daemon.py).
 
-It watches one or more sources, records a baseline on first run, and only downloads files discovered later after their size and mtime are stable across two scans. Actual transfers are executed with `rclone copyto` so the source directory layout is preserved under the destination.
+It watches one or more sources, records a baseline on first run, and only downloads files discovered later after their size and mtime are stable across two scans. If a new folder appears, it queues one folder transfer instead of one task per child file. File transfers use `rclone copyto`; folder transfers use `rclone copy` so the source directory layout is preserved under the destination.
 
 ## Features
 
@@ -19,6 +19,7 @@ It watches one or more sources, records a baseline on first run, and only downlo
 - configurable concurrent downloads with retry handling
 - preserves source subdirectories and avoids same-name file collisions
 - waits for new files to stabilize before downloading
+- syncs newly discovered folders as a single folder task
 - scanning pauses while a download is active or queued
 - periodic mount refresh through `systemctl restart`
 - state persisted in JSON files under the working directory
@@ -202,6 +203,8 @@ new files -> observed -> pending -> synced
 ```
 
 `observed` means the daemon has seen a new or changed non-baseline file but has not downloaded it yet. It becomes `pending` only after size and mtime are unchanged across the next scan.
+
+When a new folder is detected, the daemon tracks the folder as the task boundary. Files inside that folder are not queued one by one; after the folder subtree is stable across scans, one folder sync task is queued.
 
 Telegram:
 

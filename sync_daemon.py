@@ -30,6 +30,8 @@ LOG_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 ROTATED_LOG_NAME_RE = re.compile(rf"^{re.escape(LOG_FILE)}\.\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}$")
 SERVICE_NAME = "rclone-pikpak"
 FILE_STABILITY_SCAN_COUNT = 2
+ENTRY_TYPE_FILE = "file"
+ENTRY_TYPE_DIRECTORY = "directory"
 TELEGRAM_MARKDOWN_PARSE_MODE = "MarkdownV2"
 TELEGRAM_MARKDOWN_V2_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!\\])")
 PRIVATE_FILE_MODE = 0o600
@@ -109,6 +111,7 @@ class DownloadTask:
     source_file: str
     dest_path: str
     relative_path: str
+    entry_type: str = ENTRY_TYPE_FILE
 
 
 @dataclass(frozen=True)
@@ -668,6 +671,60 @@ class SyncDaemon:
             return self._join_remote_path(dest_root, "/".join(path_parts))
         return str(self._dest_file_path(dest_root, relative_path))
 
+    def _normalized_relative_path(self, relative_path: str) -> str:
+        return str(relative_path).replace("\\", "/").strip("/")
+
+    def _relative_parent_paths(self, relative_path: str) -> List[str]:
+        normalized = self._normalized_relative_path(relative_path)
+        if not normalized:
+            return []
+        parts = [part for part in normalized.split("/") if part]
+        return ["/".join(parts[:idx]) for idx in range(1, len(parts))]
+
+    def _is_relative_path_under_directory(self, relative_path: str, directory_relative_path: str) -> bool:
+        relative = self._normalized_relative_path(relative_path)
+        directory = self._normalized_relative_path(directory_relative_path)
+        return bool(relative and directory and relative != directory and relative.startswith(f"{directory}/"))
+
+    def _directory_task_relative_paths(self, files_state: Dict[str, object]) -> List[str]:
+        directories: List[str] = []
+        for entry_state in files_state.values():
+            if not isinstance(entry_state, dict):
+                continue
+            if entry_state.get("entry_type", ENTRY_TYPE_FILE) != ENTRY_TYPE_DIRECTORY:
+                continue
+            if entry_state.get("status") not in ("observed", "pending", "failed", "permanent_failed"):
+                continue
+            relative_path = str(entry_state.get("relative_path") or "").strip()
+            if relative_path:
+                directories.append(relative_path)
+        directories.sort(key=lambda value: value.count("/"))
+        return directories
+
+    def _is_covered_by_directory_task(self, relative_path: str, directory_relative_paths: List[str]) -> bool:
+        return any(
+            self._is_relative_path_under_directory(relative_path, directory_relative_path)
+            for directory_relative_path in directory_relative_paths
+        )
+
+    def _is_covered_by_other_directory_task(
+        self,
+        relative_path: str,
+        directory_relative_paths: List[str],
+    ) -> bool:
+        relative = self._normalized_relative_path(relative_path)
+        return any(
+            self._normalized_relative_path(directory_relative_path) != relative
+            and self._is_relative_path_under_directory(relative, directory_relative_path)
+            for directory_relative_path in directory_relative_paths
+        )
+
+    def _entry_type_for_state(self, file_state: Dict[str, object]) -> str:
+        entry_type = str(file_state.get("entry_type") or ENTRY_TYPE_FILE)
+        if entry_type == ENTRY_TYPE_DIRECTORY:
+            return ENTRY_TYPE_DIRECTORY
+        return ENTRY_TYPE_FILE
+
     def _rule_config_id(self, _idx: int, item: dict) -> str:
         configured_id = str(item.get("id", "")).strip()
         if configured_id:
@@ -1124,6 +1181,7 @@ class SyncDaemon:
                 for source_file, file_state in rules_state[rule.rule_id]["files"].items():
                     if not isinstance(file_state, dict):
                         continue
+                    file_state.setdefault("entry_type", ENTRY_TYPE_FILE)
                     file_state.setdefault("relative_path", self._relative_path_for_source_file(rule, source_file))
                     file_state.setdefault("stable_seen_count", FILE_STABILITY_SCAN_COUNT)
         self.save_state()
@@ -1155,6 +1213,21 @@ class SyncDaemon:
                     name for name in dirs
                     if not self._is_path_within(os.path.join(root, name), excluded_dest)
                 ]
+            for name in dirs:
+                full_path = os.path.join(root, name)
+                try:
+                    dir_stat = os.stat(full_path)
+                except OSError as exc:
+                    self.log_error(EventType.ERROR, "failed to stat directory", directory=full_path, error=str(exc))
+                    continue
+                relative_path = os.path.relpath(full_path, source_path)
+                files[full_path] = {
+                    "relative_path": relative_path,
+                    "size": 0,
+                    "mtime_ns": dir_stat.st_mtime_ns,
+                    "last_seen": self.now_iso(),
+                    "entry_type": ENTRY_TYPE_DIRECTORY,
+                }
             for name in file_names:
                 full_path = os.path.join(root, name)
                 try:
@@ -1168,7 +1241,9 @@ class SyncDaemon:
                     "size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
                     "last_seen": self.now_iso(),
+                    "entry_type": ENTRY_TYPE_FILE,
                 }
+                self._add_file_to_local_directory_metadata(files, source_path, relative_path, stat.st_size, stat.st_mtime_ns)
         return files
 
     def discover_remote_files(self, source_path: str) -> Dict[str, Dict[str, object]]:
@@ -1177,7 +1252,6 @@ class SyncDaemon:
             "lsjson",
             source_path,
             "--recursive",
-            "--files-only",
             "--no-mimetype",
         ]
         result = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
@@ -1202,13 +1276,64 @@ class SyncDaemon:
             if not relative_path:
                 continue
             full_path = self._join_remote_path(source_path, relative_path)
+            entry_type = ENTRY_TYPE_DIRECTORY if item.get("IsDir") else ENTRY_TYPE_FILE
+            size = 0 if entry_type == ENTRY_TYPE_DIRECTORY else int(item.get("Size") or 0)
+            mtime_ns = self._to_mtime_ns(item.get("ModTime"))
+            if entry_type == ENTRY_TYPE_DIRECTORY and full_path in files:
+                existing = files[full_path]
+                existing["last_seen"] = now
+                existing["mtime_ns"] = max(int(existing.get("mtime_ns", 0)), mtime_ns)
+                continue
             files[full_path] = {
                 "relative_path": relative_path,
-                "size": int(item.get("Size") or 0),
-                "mtime_ns": self._to_mtime_ns(item.get("ModTime")),
+                "size": size,
+                "mtime_ns": mtime_ns,
                 "last_seen": now,
+                "entry_type": entry_type,
             }
+            if entry_type == ENTRY_TYPE_FILE:
+                self._add_file_to_remote_directory_metadata(files, source_path, relative_path, size, mtime_ns, now)
         return files
+
+    def _add_file_to_local_directory_metadata(
+        self,
+        entries: Dict[str, Dict[str, object]],
+        source_root: str,
+        relative_path: str,
+        size: int,
+        mtime_ns: int,
+    ) -> None:
+        for parent_relative_path in self._relative_parent_paths(relative_path):
+            directory_path = os.path.join(source_root, *parent_relative_path.split("/"))
+            directory_entry = entries.get(directory_path)
+            if not isinstance(directory_entry, dict):
+                continue
+            directory_entry["size"] = int(directory_entry.get("size", 0)) + size
+            directory_entry["mtime_ns"] = max(int(directory_entry.get("mtime_ns", 0)), mtime_ns)
+
+    def _add_file_to_remote_directory_metadata(
+        self,
+        entries: Dict[str, Dict[str, object]],
+        source_root: str,
+        relative_path: str,
+        size: int,
+        mtime_ns: int,
+        now: str,
+    ) -> None:
+        for parent_relative_path in self._relative_parent_paths(relative_path):
+            directory_path = self._join_remote_path(source_root, parent_relative_path)
+            directory_entry = entries.setdefault(
+                directory_path,
+                {
+                    "relative_path": parent_relative_path,
+                    "size": 0,
+                    "mtime_ns": 0,
+                    "last_seen": now,
+                    "entry_type": ENTRY_TYPE_DIRECTORY,
+                },
+            )
+            directory_entry["size"] = int(directory_entry.get("size", 0)) + size
+            directory_entry["mtime_ns"] = max(int(directory_entry.get("mtime_ns", 0)), mtime_ns)
 
     def _join_remote_path(self, source_root: str, relative_path: str) -> str:
         path = Path(relative_path)
@@ -1344,6 +1469,7 @@ class SyncDaemon:
                         "last_seen": meta["last_seen"],
                         "relative_path": str(meta.get("relative_path") or self._relative_path_for_source_file(rule, path)),
                         "stable_seen_count": FILE_STABILITY_SCAN_COUNT,
+                        "entry_type": str(meta.get("entry_type") or ENTRY_TYPE_FILE),
                     }
                 rule_state["initialized"] = True
                 rule_state["initialized_at"] = self.now_iso()
@@ -1428,6 +1554,7 @@ class SyncDaemon:
 
                 for source_file, meta in discovered.items():
                     relative_path = str(meta.get("relative_path") or self._relative_path_for_source_file(rule, source_file))
+                    entry_type = str(meta.get("entry_type") or ENTRY_TYPE_FILE)
                     current_size = int(meta["size"])
                     current_mtime_ns = int(meta["mtime_ns"])
                     if source_file not in files_state:
@@ -1441,6 +1568,7 @@ class SyncDaemon:
                             "last_seen": meta["last_seen"],
                             "relative_path": relative_path,
                             "stable_seen_count": 1,
+                            "entry_type": entry_type,
                         }
                         new_files += 1
                         state_changed = True
@@ -1449,6 +1577,7 @@ class SyncDaemon:
                     file_state = files_state[source_file]
                     file_state["last_seen"] = meta["last_seen"]
                     file_state["relative_path"] = relative_path
+                    file_state["entry_type"] = entry_type
 
                     previous_size = int(file_state.get("size", -1))
                     previous_mtime_ns = int(file_state.get("mtime_ns", -1))
@@ -1476,20 +1605,39 @@ class SyncDaemon:
                     if file_state.get("status") == "observed" and stable_seen_count >= FILE_STABILITY_SCAN_COUNT:
                         file_state["status"] = "pending"
                         state_changed = True
-                        queued_files += 1
-                        tasks_to_enqueue.append(
-                            DownloadTask(
-                                rule_id=rule.rule_id,
-                                source_file=source_file,
-                                dest_path=rule.dest_path,
-                                relative_path=relative_path,
-                            )
-                        )
 
                 missing_files = [f for f in list(files_state) if f not in discovered]
                 for f in missing_files:
                     del files_state[f]
                     state_changed = True
+                directory_task_relative_paths = self._directory_task_relative_paths(files_state)
+                for source_file, file_state in files_state.items():
+                    if not isinstance(file_state, dict):
+                        continue
+                    if file_state.get("status") != "pending":
+                        continue
+                    relative_path = str(file_state.get("relative_path") or self._relative_path_for_source_file(rule, source_file))
+                    entry_type = self._entry_type_for_state(file_state)
+                    if (
+                        entry_type == ENTRY_TYPE_FILE
+                        and self._is_covered_by_directory_task(relative_path, directory_task_relative_paths)
+                    ):
+                        continue
+                    if (
+                        entry_type == ENTRY_TYPE_DIRECTORY
+                        and self._is_covered_by_other_directory_task(relative_path, directory_task_relative_paths)
+                    ):
+                        continue
+                    queued_files += 1
+                    tasks_to_enqueue.append(
+                        DownloadTask(
+                            rule_id=rule.rule_id,
+                            source_file=source_file,
+                            dest_path=rule.dest_path,
+                            relative_path=relative_path,
+                            entry_type=entry_type,
+                        )
+                    )
                 rule_state["last_check"] = self._build_last_check(
                     kind="incremental_scan",
                     started_at=check_started_at,
@@ -1531,6 +1679,7 @@ class SyncDaemon:
                 if not rule.enabled:
                     continue
                 rule_state = self.state["rules"][rule.rule_id]
+                directory_task_relative_paths = self._directory_task_relative_paths(rule_state["files"])
                 for source_file, file_state in rule_state["files"].items():
                     status = file_state.get("status")
                     retry_count = int(file_state.get("retry_count", 0))
@@ -1539,11 +1688,23 @@ class SyncDaemon:
                     if status == "failed" and retry_count >= max_retry:
                         continue
                     relative_path = str(file_state.get("relative_path") or self._relative_path_for_source_file(rule, source_file))
+                    entry_type = self._entry_type_for_state(file_state)
+                    if (
+                        entry_type == ENTRY_TYPE_FILE
+                        and self._is_covered_by_directory_task(relative_path, directory_task_relative_paths)
+                    ):
+                        continue
+                    if (
+                        entry_type == ENTRY_TYPE_DIRECTORY
+                        and self._is_covered_by_other_directory_task(relative_path, directory_task_relative_paths)
+                    ):
+                        continue
                     task = DownloadTask(
                         rule_id=rule.rule_id,
                         source_file=source_file,
                         dest_path=rule.dest_path,
                         relative_path=relative_path,
+                        entry_type=entry_type,
                     )
                     if self.enqueue_download(task):
                         queued_count += 1
@@ -1671,9 +1832,22 @@ class SyncDaemon:
         with self.rc_port_lock:
             self.reserved_rc_ports.discard(port)
 
-    def _build_rclone_copy_command(self, source_file: str, dest_file: str, rc_addr: str) -> List[str]:
-        command = [
-            self.config["rclone_command"], "copyto", source_file, dest_file,
+    def _build_rclone_copy_command(
+        self,
+        source_file: str,
+        dest_file: str,
+        rc_addr: str,
+        entry_type: str,
+    ) -> List[str]:
+        if entry_type == ENTRY_TYPE_DIRECTORY:
+            command = [
+                self.config["rclone_command"], "copy", source_file, dest_file,
+                "--create-empty-src-dirs",
+            ]
+        else:
+            command = [self.config["rclone_command"], "copyto", source_file, dest_file]
+
+        command.extend([
             "--rc",
             "--rc-addr", rc_addr,
             "--transfers", "2",
@@ -1683,7 +1857,7 @@ class SyncDaemon:
             "--low-level-retries", "20",
             "--timeout", "1m",
             "--contimeout", "15s",
-        ]
+        ])
         bandwidth_limit = self.config.get("bandwidth_limit_mbps", 0)
         if bandwidth_limit > 0:
             command.extend(["--bwlimit", f"{bandwidth_limit}M"])
@@ -1762,12 +1936,19 @@ class SyncDaemon:
 
         self.save_state()
 
-    def notify_download_completed(self, rule_id: str, source_file: str, dest_path: str, duration_seconds: float) -> None:
+    def notify_download_completed(
+        self,
+        rule_id: str,
+        source_file: str,
+        dest_path: str,
+        duration_seconds: float,
+        entry_type: str = ENTRY_TYPE_FILE,
+    ) -> None:
         telegram = self.config.get("telegram", {})
         if not isinstance(telegram, dict) or not telegram.get("enabled"):
             return
 
-        message = self._format_download_completed_message(rule_id, source_file, dest_path, duration_seconds)
+        message = self._format_download_completed_message(rule_id, source_file, dest_path, duration_seconds, entry_type)
         self._send_telegram_message(message)
 
     def _format_download_completed_message(
@@ -1776,15 +1957,17 @@ class SyncDaemon:
         source_file: str,
         dest_path: str,
         duration_seconds: float,
+        entry_type: str = ENTRY_TYPE_FILE,
     ) -> str:
         filename = Path(source_file.rstrip("/")).name or source_file
         duration_text = self._format_duration(duration_seconds)
         completed_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        label = "文件夹" if entry_type == ENTRY_TYPE_DIRECTORY else "文件"
 
         return "\n".join(
             [
-                "✅ 文件同步完成",
-                f"文件: {filename}",
+                f"✅ {label}同步完成",
+                f"{label}: {filename}",
                 f"来源: {source_file}",
                 f"目标: {dest_path}",
                 f"规则: {rule_id}",
@@ -2168,6 +2351,7 @@ class SyncDaemon:
         source_file: str,
         dest_path: str,
         start_time: float,
+        entry_type: str = ENTRY_TYPE_FILE,
     ) -> None:
         self.update_download_state(rule_id, source_file, success=True, error=None)
         duration = round(time.time() - start_time, 3)
@@ -2176,21 +2360,50 @@ class SyncDaemon:
             "download completed",
             rule_id=rule_id,
             source_file=source_file,
+            entry_type=entry_type,
             duration_seconds=duration,
         )
-        self.notify_download_completed(rule_id, source_file, dest_path, duration)
+        self.notify_download_completed(rule_id, source_file, dest_path, duration, entry_type)
+
+    def _mark_descendants_synced(self, rule_state: Dict[str, object], directory_relative_path: str) -> None:
+        files_state = rule_state.get("files", {})
+        if not isinstance(files_state, dict):
+            return
+
+        changed = False
+        for source_file, file_state in files_state.items():
+            if not isinstance(file_state, dict):
+                continue
+            if self._entry_type_for_state(file_state) != ENTRY_TYPE_FILE:
+                continue
+            relative_path = str(file_state.get("relative_path") or "")
+            if not self._is_relative_path_under_directory(relative_path, directory_relative_path):
+                continue
+            file_state["status"] = "synced"
+            file_state["retry_count"] = 0
+            file_state["last_error"] = None
+            file_state["stable_seen_count"] = FILE_STABILITY_SCAN_COUNT
+            file_state["last_attempt"] = self.now_iso()
+            changed = True
+
+        if changed:
+            self.save_state()
 
     def handle_download(self, task: DownloadTask) -> None:
         rule_id = task.rule_id
         source_file = task.source_file
         dest_path = task.dest_path
+        entry_type = task.entry_type
         if self.stop_event.is_set():
             return
 
         try:
             dest_file = self._dest_file_target(dest_path, task.relative_path)
             if not is_rclone_remote(dest_path):
-                Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
+                if entry_type == ENTRY_TYPE_DIRECTORY:
+                    Path(dest_file).mkdir(parents=True, exist_ok=True)
+                else:
+                    Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as exc:
             error_text = f"failed to prepare destination: {exc}"
             self.update_download_state(rule_id, source_file, success=False, error=error_text)
@@ -2222,7 +2435,7 @@ class SyncDaemon:
                     host = str(rc_config.get("host", "127.0.0.1"))
                 rc_addr = f"{host}:{rc_port}"
                 rc_url = f"http://{rc_addr}"
-                command = self._build_rclone_copy_command(source_file, dest_file, rc_addr)
+                command = self._build_rclone_copy_command(source_file, dest_file, rc_addr, entry_type)
 
                 process = subprocess.Popen(
                     command,
@@ -2266,7 +2479,7 @@ class SyncDaemon:
                         self.active_transfers.pop(key, None)
 
                 if returncode == 0:
-                    self._mark_download_completed(rule_id, source_file, str(dest_file), start_time)
+                    self._mark_download_completed(rule_id, source_file, str(dest_file), start_time, entry_type)
                     return
 
                 if self.stop_event.is_set():
@@ -2333,6 +2546,8 @@ class SyncDaemon:
                 self._release_rc_port(rc_port)
 
     def update_download_state(self, rule_id: str, source_file: str, success: bool, error: Optional[str]) -> None:
+        entry_type = ENTRY_TYPE_FILE
+        relative_path = ""
         with self.state_lock:
             rule_state = self.state["rules"].get(rule_id)
             if not rule_state:
@@ -2340,6 +2555,12 @@ class SyncDaemon:
             file_state = rule_state["files"].get(source_file)
             if not file_state:
                 return
+            entry_type = self._entry_type_for_state(file_state)
+            relative_path = str(file_state.get("relative_path") or "")
+            if not relative_path:
+                rule = next((item for item in self.rules if item.rule_id == rule_id), None)
+                if rule is not None:
+                    relative_path = self._relative_path_for_source_file(rule, source_file)
 
             file_state["last_attempt"] = self.now_iso()
             if success:
@@ -2357,6 +2578,12 @@ class SyncDaemon:
                 file_state["last_error"] = error
 
         self.save_state()
+
+        if success and entry_type == ENTRY_TYPE_DIRECTORY and relative_path:
+            with self.state_lock:
+                rule_state = self.state["rules"].get(rule_id)
+                if isinstance(rule_state, dict):
+                    self._mark_descendants_synced(rule_state, relative_path)
 
     def refresh_mount(self) -> None:
         if self.stop_event.is_set():
