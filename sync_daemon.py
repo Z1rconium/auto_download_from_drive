@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ MAX_QUEUE_SIZE = 10000
 MAX_TELEGRAM_POLL_TIMEOUT_SECONDS = 120
 MAX_TELEGRAM_PROGRESS_REFRESH_SECONDS = 300
 MAX_TELEGRAM_PROGRESS_LIVE_SECONDS = 3600
+MAX_TELEGRAM_RCLONE_STATS_WORKERS = 32
 MAX_RCLONE_RC_REQUEST_TIMEOUT_SECONDS = 60
 MAX_RCLONE_RC_PORT = 65535
 RCLONE_RC_ADDRESS_IN_USE_MARKERS = (
@@ -417,16 +419,21 @@ def format_rules_state_view(rules: List[Rule], state: Dict[str, object], markdow
         rule_state = rules_state.get(rule.rule_id, {})
         if not isinstance(rule_state, dict):
             rule_state = {}
-        files_state = rule_state.get("files", {})
-        if not isinstance(files_state, dict):
-            files_state = {}
-
+        precomputed_counts = rule_state.get("status_counts")
         counts: Dict[str, int] = {}
-        for file_state in files_state.values():
-            if not isinstance(file_state, dict):
-                continue
-            status = str(file_state.get("status") or "unknown")
-            counts[status] = counts.get(status, 0) + 1
+        if isinstance(precomputed_counts, dict):
+            for status, count in precomputed_counts.items():
+                counts[str(status)] = _safe_int(count)
+        else:
+            files_state = rule_state.get("files", {})
+            if not isinstance(files_state, dict):
+                files_state = {}
+
+            for file_state in files_state.values():
+                if not isinstance(file_state, dict):
+                    continue
+                status = str(file_state.get("status") or "unknown")
+                counts[status] = counts.get(status, 0) + 1
 
         status_parts = []
         for status in ("baseline", "observed", "pending", "failed", "permanent_failed", "synced"):
@@ -1905,10 +1912,7 @@ class SyncDaemon:
     def _build_downloading_view(self) -> str:
         snapshot, queued_count = self._active_transfer_snapshot()
         transfers = [transfer for _key, transfer in snapshot]
-        stats_by_key: Dict[str, Dict[str, Any]] = {}
-
-        for key, transfer in snapshot:
-            stats_by_key[key] = self._fetch_rclone_stats(transfer.rc_url)
+        stats_by_key = self._fetch_active_rclone_stats(snapshot)
 
         return format_downloading_view(
             transfers,
@@ -1917,9 +1921,61 @@ class SyncDaemon:
             queued_count,
         )
 
+    def _fetch_active_rclone_stats(self, snapshot: List[Tuple[str, ActiveTransfer]]) -> Dict[str, Dict[str, Any]]:
+        if not snapshot:
+            return {}
+
+        if len(snapshot) == 1:
+            key, transfer = snapshot[0]
+            return {key: self._fetch_rclone_stats(transfer.rc_url)}
+
+        max_workers = min(len(snapshot), MAX_TELEGRAM_RCLONE_STATS_WORKERS)
+        stats_by_key: Dict[str, Dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rclone-stats") as executor:
+            future_to_key = {
+                executor.submit(self._fetch_rclone_stats, transfer.rc_url): key
+                for key, transfer in snapshot
+            }
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    stats_by_key[key] = future.result()
+                except Exception as exc:
+                    stats_by_key[key] = {"error": str(exc.__class__.__name__)}
+        return stats_by_key
+
     def _build_rules_state_view(self) -> str:
+        rules_state_summary: Dict[str, Dict[str, object]] = {}
         with self.state_lock:
-            state_snapshot = json.loads(json.dumps(self.state))
+            rules_state = self.state.get("rules", {})
+            if not isinstance(rules_state, dict):
+                rules_state = {}
+
+            for rule in self.rules:
+                rule_state = rules_state.get(rule.rule_id, {})
+                if not isinstance(rule_state, dict):
+                    rule_state = {}
+
+                files_state = rule_state.get("files", {})
+                counts: Dict[str, int] = {}
+                if isinstance(files_state, dict):
+                    for file_state in files_state.values():
+                        if not isinstance(file_state, dict):
+                            continue
+                        status = str(file_state.get("status") or "unknown")
+                        counts[status] = counts.get(status, 0) + 1
+
+                last_check = rule_state.get("last_check")
+                if isinstance(last_check, dict):
+                    last_check = dict(last_check)
+
+                rules_state_summary[rule.rule_id] = {
+                    "initialized": rule_state.get("initialized"),
+                    "last_check": last_check,
+                    "status_counts": counts,
+                }
+
+        state_snapshot = {"rules": rules_state_summary}
         return format_rules_state_view(self.rules, state_snapshot)
 
     def _mark_download_pending(self, rule_id: str, source_file: str) -> None:
@@ -2276,7 +2332,7 @@ class SyncDaemon:
         return self._telegram_api_request(
             "answerCallbackQuery",
             {"callback_query_id": callback_id},
-            timeout=10,
+            timeout=3,
         )
 
     def _telegram_api_request(
